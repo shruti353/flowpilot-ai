@@ -1,3 +1,11 @@
+"""Tests for POST /api/v1/agent/plan.
+
+Note: since Week 2, `status` on this endpoint is the stored plan's
+lifecycle status ("awaiting_approval" / "needs_clarification" / "error"),
+not a generic "success"/"error" flag - see app/models/stored_plan.py.
+Plan lifecycle (approve/reject/cancel) tests live in tests/test_plans.py.
+"""
+
 from fastapi.testclient import TestClient
 
 import app.services.ollama_service as ollama_service
@@ -55,10 +63,11 @@ def test_plan_endpoint_returns_valid_multi_action_plan():
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "success"
+    assert body["status"] == "awaiting_approval"
     assert body["execution_plan"]["status"] == "ready"
     assert len(body["execution_plan"]["actions"]) == 2
     assert body["request_id"]
+    assert body["plan_id"]
 
 
 def test_plan_endpoint_returns_structured_error_for_unsupported_tool():
@@ -84,6 +93,9 @@ def test_plan_endpoint_returns_structured_error_for_unsupported_tool():
     assert body["status"] == "error"
     assert body["execution_plan"] is None
     assert body["errors"]
+    # Even a failed generation is stored (as "error") so it has a plan_id
+    # and is traceable/retrievable via GET /plans/{plan_id}.
+    assert body["plan_id"]
 
 
 def test_plan_endpoint_flags_missing_critical_information():
@@ -106,9 +118,10 @@ def test_plan_endpoint_flags_missing_critical_information():
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "success"
+    assert body["status"] == "needs_clarification"
     assert body["execution_plan"]["status"] == "needs_clarification"
     assert body["execution_plan"]["actions"][0]["missing_information"] == ["title"]
+    assert body["plan_id"]
 
 
 def test_plan_endpoint_returns_502_when_llm_unreachable():

@@ -1,0 +1,93 @@
+"""Week 2: human-in-the-loop plan lifecycle models.
+
+These wrap the Week 1 `ExecutionPlan` with persistence + approval state.
+Storage itself lives in `app/repositories/plan_repository.py` and is
+in-memory only - every StoredPlan is lost when the process restarts.
+"""
+
+from datetime import datetime
+from enum import Enum
+
+from pydantic import BaseModel, Field
+
+from app.models.execution_plan import ExecutionPlan, ValidationErrorDetail
+
+
+class StoredPlanStatus(str, Enum):
+    #: Fully-specified plan, persisted, waiting on a human decision.
+    awaiting_approval = "awaiting_approval"
+    #: Structurally valid plan, but at least one action is missing required
+    #: details. Persisted for visibility, but never approvable as-is.
+    needs_clarification = "needs_clarification"
+    approved = "approved"
+    rejected = "rejected"
+    cancelled = "cancelled"
+    #: The request could not be turned into a valid plan at all (e.g. an
+    #: unsupported tool/operation, or an unparseable LLM response).
+    error = "error"
+
+
+#: The only status a plan may be approved/rejected/cancelled from.
+PENDING_STATUS = StoredPlanStatus.awaiting_approval
+
+
+class StoredPlan(BaseModel):
+    """A plan persisted by the in-memory repository."""
+
+    plan_id: str
+    status: StoredPlanStatus
+    execution_plan: ExecutionPlan | None = None
+    errors: list[ValidationErrorDetail] | None = None
+    rejection_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentPlanResponse(BaseModel):
+    """Response body for POST /api/v1/agent/plan.
+
+    `status` is the STORED plan's lifecycle status: "awaiting_approval" for
+    a fully-specified plan, "needs_clarification" if required information
+    is missing, or "error" if the request could not be turned into a valid
+    plan at all. It never reflects execution - nothing is ever executed.
+    """
+
+    request_id: str
+    plan_id: str | None = None
+    status: StoredPlanStatus
+    execution_plan: ExecutionPlan | None = None
+    errors: list[ValidationErrorDetail] | None = None
+
+
+class RejectPlanRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class ApprovePlanResponse(BaseModel):
+    plan_id: str
+    status: StoredPlanStatus
+    message: str
+    plan: StoredPlan
+
+
+class RejectPlanResponse(BaseModel):
+    plan_id: str
+    status: StoredPlanStatus
+    message: str
+    rejection_reason: str | None = None
+    plan: StoredPlan
+
+
+class CancelPlanResponse(BaseModel):
+    plan_id: str
+    status: StoredPlanStatus
+    message: str
+    plan: StoredPlan
+
+
+class PlanErrorDetail(BaseModel):
+    """Structured error payload for 404 / 409 responses on plan endpoints."""
+
+    plan_id: str
+    message: str
+    current_status: StoredPlanStatus | None = None

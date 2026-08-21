@@ -1,7 +1,11 @@
-"""Execution plan schema and the top-level API response envelope."""
+"""Execution plan schema: the AI's structured, not-yet-executed output.
+
+The Week 2 persistence/approval envelope (StoredPlan, AgentPlanResponse,
+etc.) lives in app/models/stored_plan.py, which imports from here - keep
+this module free of that dependency to avoid a circular import.
+"""
 
 from enum import Enum
-from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -38,12 +42,3 @@ class ValidationErrorDetail(BaseModel):
 
     loc: str = Field(..., description="Dotted path to the offending field, e.g. 'actions.0.tool'.")
     message: str
-
-
-class AgentPlanResponse(BaseModel):
-    """Response body for POST /api/v1/agent/plan."""
-
-    request_id: str
-    status: Literal["success", "error"]
-    execution_plan: ExecutionPlan | None = None
-    errors: list[ValidationErrorDetail] | None = None
