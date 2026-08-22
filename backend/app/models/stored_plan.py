@@ -1,8 +1,9 @@
-"""Week 2: human-in-the-loop plan lifecycle models.
+"""Human-in-the-loop plan lifecycle models: persistence + approval state
+(Week 2), extended with approval-gated execution state (Week 3).
 
-These wrap the Week 1 `ExecutionPlan` with persistence + approval state.
-Storage itself lives in `app/repositories/plan_repository.py` and is
-in-memory only - every StoredPlan is lost when the process restarts.
+These wrap the Week 1 `ExecutionPlan`. Storage itself lives in
+`app/repositories/plan_repository.py` and is in-memory only - every
+StoredPlan is lost when the process restarts.
 """
 
 from datetime import datetime
@@ -10,6 +11,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from app.execution.result import PlanExecutionResult
 from app.models.execution_plan import ExecutionPlan, ValidationErrorDetail
 
 
@@ -25,10 +27,38 @@ class StoredPlanStatus(str, Enum):
     #: The request could not be turned into a valid plan at all (e.g. an
     #: unsupported tool/operation, or an unparseable LLM response).
     error = "error"
+    #: Week 3: claimed for execution. Transient - a single synchronous
+    #: /execute call moves a plan through this on its way to one of the
+    #: three terminal execution outcomes below. No plan should be
+    #: observed sitting in "executing" between requests.
+    executing = "executing"
+    #: Every action executed successfully.
+    executed = "executed"
+    #: At least one action succeeded, but at least one failed or is
+    #: unsupported.
+    partially_executed = "partially_executed"
+    #: No action succeeded (all failed, all unsupported, or a mix).
+    execution_failed = "execution_failed"
 
 
 #: The only status a plan may be approved/rejected/cancelled from.
 PENDING_STATUS = StoredPlanStatus.awaiting_approval
+
+#: Statuses a plan can never execute from - approval was never granted,
+#: or the decision/outcome already happened.
+NON_EXECUTABLE_STATUSES = frozenset(
+    {
+        StoredPlanStatus.awaiting_approval,
+        StoredPlanStatus.needs_clarification,
+        StoredPlanStatus.rejected,
+        StoredPlanStatus.cancelled,
+        StoredPlanStatus.error,
+        StoredPlanStatus.executing,
+        StoredPlanStatus.executed,
+        StoredPlanStatus.partially_executed,
+        StoredPlanStatus.execution_failed,
+    }
+)
 
 
 class StoredPlan(BaseModel):
@@ -39,6 +69,8 @@ class StoredPlan(BaseModel):
     execution_plan: ExecutionPlan | None = None
     errors: list[ValidationErrorDetail] | None = None
     rejection_reason: str | None = None
+    #: Populated once /execute has been called at least once. None before that.
+    execution: PlanExecutionResult | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -82,6 +114,21 @@ class CancelPlanResponse(BaseModel):
     plan_id: str
     status: StoredPlanStatus
     message: str
+    plan: StoredPlan
+
+
+class ExecutePlanResponse(BaseModel):
+    """Response body for POST /api/v1/plans/{plan_id}/execute.
+
+    `status` is one of "executed", "partially_executed", or
+    "execution_failed" - the endpoint never returns without having
+    reached one of these three terminal outcomes.
+    """
+
+    plan_id: str
+    status: StoredPlanStatus
+    message: str
+    execution: PlanExecutionResult | None = None
     plan: StoredPlan
 
 

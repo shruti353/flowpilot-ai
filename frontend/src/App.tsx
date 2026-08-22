@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ApiError, approvePlan, generatePlan, rejectPlan } from "./services/api";
+import { ApiError, approvePlan, executePlan, generatePlan, rejectPlan } from "./services/api";
 import type { StoredPlan } from "./types/plan";
 import { RequestInput } from "./components/RequestInput";
 import { PlanPreview } from "./components/PlanPreview";
@@ -9,6 +9,7 @@ function App() {
   const [plan, setPlan] = useState<StoredPlan | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDeciding, setIsDeciding] = useState(false);
+  const [isExecuting, setIsExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleGenerate = async (text: string) => {
@@ -24,6 +25,7 @@ function App() {
         execution_plan: response.execution_plan,
         errors: response.errors,
         rejection_reason: null,
+        execution: null,
         created_at: new Date(0).toISOString(),
         updated_at: new Date(0).toISOString(),
       });
@@ -62,6 +64,20 @@ function App() {
     }
   };
 
+  const handleExecute = async () => {
+    if (!plan || isExecuting) return;
+    setIsExecuting(true);
+    setError(null);
+    try {
+      const response = await executePlan(plan.plan_id);
+      setPlan(response.plan);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not execute the plan.");
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
   return (
     <main className="app">
       <header className="app__header">
@@ -92,7 +108,9 @@ function App() {
             plan={plan}
             onApprove={handleApprove}
             onReject={handleReject}
+            onExecute={handleExecute}
             isSubmitting={isDeciding}
+            isExecuting={isExecuting}
           />
         </>
       )}

@@ -7,6 +7,10 @@ const STATUS_LABELS: Record<StoredPlanStatus, string> = {
   rejected: "Rejected",
   cancelled: "Cancelled",
   error: "Error",
+  executing: "Executing",
+  executed: "Executed",
+  partially_executed: "Partially Executed",
+  execution_failed: "Execution Failed",
 };
 
 export function PlanStatusBadge({ status }: { status: StoredPlanStatus }) {

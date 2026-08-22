@@ -1,23 +1,47 @@
 import { useState } from "react";
 import type { StoredPlan } from "../types/plan";
+import { ExecutionResult } from "./ExecutionResult";
 
 interface ApprovalControlsProps {
   plan: StoredPlan;
   onApprove: () => void;
   onReject: (reason?: string) => void;
+  onExecute: () => void;
   isSubmitting: boolean;
+  isExecuting: boolean;
 }
 
-export function ApprovalControls({ plan, onApprove, onReject, isSubmitting }: ApprovalControlsProps) {
+const EXECUTION_STATUSES = new Set(["executing", "executed", "partially_executed", "execution_failed"]);
+
+export function ApprovalControls({
+  plan,
+  onApprove,
+  onReject,
+  onExecute,
+  isSubmitting,
+  isExecuting,
+}: ApprovalControlsProps) {
   const [reason, setReason] = useState("");
   const [isRejecting, setIsRejecting] = useState(false);
+
+  if (EXECUTION_STATUSES.has(plan.status)) {
+    return <ExecutionResult plan={plan} />;
+  }
 
   if (plan.status === "approved") {
     return (
       <div className="decision-result decision-result--approved">
         <p className="decision-result__title">STATUS: APPROVED</p>
-        <p>Plan approved successfully.</p>
+        <p>Plan approved. Ready for execution.</p>
         <p>No actions have been executed yet.</p>
+        <button
+          type="button"
+          className="btn btn--primary"
+          disabled={isExecuting}
+          onClick={onExecute}
+        >
+          {isExecuting ? "Executing..." : "Execute Plan"}
+        </button>
       </div>
     );
   }

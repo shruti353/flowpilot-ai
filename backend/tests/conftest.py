@@ -1,5 +1,6 @@
 import pytest
 
+import app.execution.n8n_client as n8n_client
 import app.services.ollama_service as ollama_service
 from app.repositories.plan_repository import get_plan_repository
 
@@ -19,6 +20,13 @@ def reset_plan_repository():
     get_plan_repository().clear()
 
 
+@pytest.fixture(autouse=True)
+def reset_n8n_client_override():
+    """Ensure no test's fake n8n client leaks into the next test."""
+    yield
+    n8n_client.set_n8n_client(None)
+
+
 class FakeProvider:
     """Test double for LLMProvider: returns a canned value or raises."""
 
@@ -27,6 +35,22 @@ class FakeProvider:
         self._error = error
 
     async def generate_json(self, user_text: str):
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+class FakeN8nClient:
+    """Test double for N8nClient: returns a canned body or raises, and
+    records every call so tests can assert it was/wasn't reached."""
+
+    def __init__(self, result: dict | None = None, error: Exception | None = None):
+        self._result = result if result is not None else {"success": True}
+        self._error = error
+        self.calls: list[dict] = []
+
+    async def post(self, url: str, payload: dict, timeout_seconds: float):
+        self.calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
         if self._error is not None:
             raise self._error
         return self._result

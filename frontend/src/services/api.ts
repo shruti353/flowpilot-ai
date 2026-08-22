@@ -6,6 +6,7 @@ import type {
   AgentPlanResponse,
   ApprovePlanResponse,
   CancelPlanResponse,
+  ExecutePlanResponse,
   RejectPlanResponse,
   StoredPlan,
   ValidationErrorDetail,
@@ -89,4 +90,8 @@ export function rejectPlan(planId: string, reason?: string): Promise<RejectPlanR
 
 export function cancelPlan(planId: string): Promise<CancelPlanResponse> {
   return request<CancelPlanResponse>(`/plans/${planId}/cancel`, { method: "POST" });
+}
+
+export function executePlan(planId: string): Promise<ExecutePlanResponse> {
+  return request<ExecutePlanResponse>(`/plans/${planId}/execute`, { method: "POST" });
 }

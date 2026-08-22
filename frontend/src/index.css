@@ -323,6 +323,30 @@ body {
   border: 1px solid var(--neutral-border);
 }
 
+.status-badge--executing {
+  background: var(--info-bg);
+  color: var(--info);
+  border: 1px solid var(--info-border);
+}
+
+.status-badge--executed {
+  background: var(--success-bg);
+  color: var(--success);
+  border: 1px solid var(--success-border);
+}
+
+.status-badge--partially_executed {
+  background: var(--warning-bg);
+  color: var(--warning);
+  border: 1px solid var(--warning-border);
+}
+
+.status-badge--execution_failed {
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid var(--danger-border);
+}
+
 /* Approval controls */
 
 .approval-controls {
@@ -386,6 +410,98 @@ body {
   background: var(--danger-bg);
   border-color: var(--danger-border);
   color: var(--danger);
+}
+
+.decision-result .btn {
+  margin-top: 0.5rem;
+}
+
+/* Execution result */
+
+.execution-result {
+  border-radius: 10px;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.execution-result__title {
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.execution-result--executing .execution-result__title {
+  color: var(--info);
+}
+
+.execution-result--executed {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+}
+
+.execution-result--executed .execution-result__title {
+  color: var(--success);
+}
+
+.execution-result--partially_executed {
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+}
+
+.execution-result--partially_executed .execution-result__title {
+  color: var(--warning);
+}
+
+.execution-result--execution_failed {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.execution-result--execution_failed .execution-result__title {
+  color: var(--danger);
+}
+
+.execution-result__actions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.execution-result__action {
+  font-size: 0.9rem;
+}
+
+.execution-result__action p {
+  margin: 0.1rem 0;
+}
+
+.execution-result__action--ok {
+  color: var(--success);
+}
+
+.execution-result__action--warn {
+  color: var(--warning);
+}
+
+.execution-result__action--error {
+  color: var(--danger);
+}
+
+.execution-result__detail {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.execution-result__action a {
+  color: var(--accent);
+  font-size: 0.85rem;
 }
 
 @media (max-width: 480px) {

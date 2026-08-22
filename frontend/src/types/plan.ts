@@ -37,11 +37,44 @@ export type StoredPlanStatus =
   | "approved"
   | "rejected"
   | "cancelled"
-  | "error";
+  | "error"
+  | "executing"
+  | "executed"
+  | "partially_executed"
+  | "execution_failed";
 
 export interface ValidationErrorDetail {
   loc: string;
   message: string;
+}
+
+// --- Week 3: execution ------------------------------------------------
+
+export type ActionExecutionStatus =
+  | "pending"
+  | "executing"
+  | "succeeded"
+  | "failed"
+  | "skipped"
+  | "unsupported";
+
+export interface ExecutionErrorDetail {
+  code: string;
+  message: string;
+}
+
+export interface ActionExecutionResult {
+  action_id: string;
+  tool: ToolName;
+  operation: OperationName;
+  status: ActionExecutionStatus;
+  result: Record<string, unknown> | null;
+  error: ExecutionErrorDetail | null;
+}
+
+export interface PlanExecutionResult {
+  status: "success" | "partial" | "failed";
+  actions: ActionExecutionResult[];
 }
 
 // Response body of POST /api/v1/agent/plan.
@@ -60,6 +93,7 @@ export interface StoredPlan {
   execution_plan: ExecutionPlan | null;
   errors: ValidationErrorDetail[] | null;
   rejection_reason: string | null;
+  execution: PlanExecutionResult | null;
   created_at: string;
   updated_at: string;
 }
@@ -83,5 +117,13 @@ export interface CancelPlanResponse {
   plan_id: string;
   status: StoredPlanStatus;
   message: string;
+  plan: StoredPlan;
+}
+
+export interface ExecutePlanResponse {
+  plan_id: string;
+  status: StoredPlanStatus;
+  message: string;
+  execution: PlanExecutionResult | null;
   plan: StoredPlan;
 }

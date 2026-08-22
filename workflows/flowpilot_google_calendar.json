@@ -1,0 +1,122 @@
+{
+  "id": "flowpilot-google-calendar-v1",
+  "name": "FlowPilot - Google Calendar (create_event)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "flowpilot-calendar",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "6f1e6f2a-1111-4a3b-9c1a-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "flowpilot-calendar"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.item.json;\nconst action = body.action || {};\nconst params = action.parameters || {};\n\nif (action.tool !== 'calendar' || action.operation !== 'create_event') {\n  throw new Error(`Unsupported action for this workflow: expected calendar.create_event, got ${action.tool}.${action.operation}`);\n}\nif (!params.title || !params.start_datetime) {\n  throw new Error('Missing required parameters: title and start_datetime are required');\n}\n\nreturn {\n  json: {\n    request_id: body.request_id,\n    plan_id: body.plan_id,\n    action_id: body.action_id,\n    title: params.title,\n    start_datetime: params.start_datetime,\n    end_datetime: params.end_datetime || params.start_datetime,\n    timezone: params.timezone || 'UTC',\n  },\n};"
+      },
+      "id": "6f1e6f2a-1111-4a3b-9c1a-000000000002",
+      "name": "Validate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "onError": "continueErrorOutput",
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "create",
+        "calendar": {
+          "__rl": true,
+          "mode": "list",
+          "value": "primary",
+          "cachedResultName": "primary"
+        },
+        "start": "={{ $json.start_datetime }}",
+        "end": "={{ $json.end_datetime }}",
+        "useDefaultReminders": true,
+        "additionalFields": {
+          "summary": "={{ $json.title }}"
+        }
+      },
+      "id": "6f1e6f2a-1111-4a3b-9c1a-000000000003",
+      "name": "Create Google Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "onError": "continueErrorOutput",
+      "position": [640, 220],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, external_event_id: $json.id, html_link: $json.htmlLink, message: \"Calendar event created successfully\" } }}",
+        "options": {}
+      },
+      "id": "6f1e6f2a-1111-4a3b-9c1a-000000000004",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [860, 160]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 200,
+        "responseBody": "={{ { success: false, error_code: \"CALENDAR_API_ERROR\", message: $json.error?.message || \"Failed to create the Google Calendar event.\" } }}",
+        "options": {}
+      },
+      "id": "6f1e6f2a-1111-4a3b-9c1a-000000000005",
+      "name": "Respond Calendar Failure",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [860, 340]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 200,
+        "responseBody": "={{ { success: false, error_code: \"INVALID_PAYLOAD\", message: $json.error?.message || \"The request payload was invalid.\" } }}",
+        "options": {}
+      },
+      "id": "6f1e6f2a-1111-4a3b-9c1a-000000000006",
+      "name": "Respond Invalid Payload",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [420, 460]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [{ "node": "Validate Payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate Payload": {
+      "main": [
+        [{ "node": "Create Google Calendar Event", "type": "main", "index": 0 }],
+        [{ "node": "Respond Invalid Payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Google Calendar Event": {
+      "main": [
+        [{ "node": "Respond Success", "type": "main", "index": 0 }],
+        [{ "node": "Respond Calendar Failure", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

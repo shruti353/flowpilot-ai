@@ -22,6 +22,22 @@ class Settings(BaseSettings):
     # to set from a .env file; use cors_allowed_origins_list to consume it.
     cors_allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # --- Week 3: execution ------------------------------------------------
+    # IANA timezone used to resolve relative datetime expressions
+    # ("tomorrow at 3 PM") at execution time. Never inferred from the LLM.
+    flowpilot_timezone: str = "Asia/Kolkata"
+    # Used as the calendar event's end time when the plan didn't specify one.
+    default_event_duration_minutes: int = 60
+
+    # Either set n8n_calendar_webhook_url directly, or set n8n_base_url and
+    # let it combine with n8n_calendar_webhook_path. Leaving both unset
+    # means execution is not configured - actions fail with a structured
+    # N8N_NOT_CONFIGURED error rather than silently doing nothing.
+    n8n_base_url: str | None = None
+    n8n_calendar_webhook_path: str = "/webhook/flowpilot-calendar"
+    n8n_calendar_webhook_url: str | None = None
+    n8n_timeout_seconds: float = 30.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -31,6 +47,14 @@ class Settings(BaseSettings):
     @property
     def cors_allowed_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+
+    @property
+    def resolved_n8n_calendar_webhook_url(self) -> str | None:
+        if self.n8n_calendar_webhook_url:
+            return self.n8n_calendar_webhook_url
+        if self.n8n_base_url:
+            return self.n8n_base_url.rstrip("/") + "/" + self.n8n_calendar_webhook_path.lstrip("/")
+        return None
 
 
 @lru_cache
