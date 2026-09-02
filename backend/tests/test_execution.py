@@ -203,6 +203,89 @@ async def test_calendar_adapter_succeeds_and_calls_n8n_with_normalized_datetime(
 
 
 @pytest.mark.asyncio
+async def test_calendar_adapter_sends_the_documented_payload_contract(configured_settings):
+    # Pins the exact payload shape workflows/flowpilot_google_calendar.json's
+    # "Validate Payload" node expects: { request_id, plan_id, action_id,
+    # action: { tool, operation, parameters: { title, start_datetime,
+    # end_datetime, timezone } } }. A silent shape drift here is exactly
+    # what broke the live integration before (see test_n8n_workflow_contract.py
+    # for the matching workflow-side assertions).
+    fake_client = FakeN8nClient(
+        result={"success": True, "external_event_id": "evt_123", "html_link": "https://calendar.example/evt_123"}
+    )
+    n8n_client.set_n8n_client(fake_client)
+
+    await execute_action(_action(), ExecutionContext(request_id="req-1", plan_id="plan-1"))
+
+    assert len(fake_client.calls) == 1
+    call = fake_client.calls[0]
+    payload = call["payload"]
+
+    assert set(payload.keys()) == {"request_id", "plan_id", "action_id", "action"}
+    assert payload["request_id"] == "req-1"
+    assert payload["plan_id"] == "plan-1"
+    assert payload["action_id"] == "action_1"
+
+    action_payload = payload["action"]
+    assert action_payload["tool"] == "calendar"
+    assert action_payload["operation"] == "create_event"
+
+    parameters = action_payload["parameters"]
+    assert set(parameters.keys()) == {"title", "start_datetime", "end_datetime", "timezone"}
+    assert parameters["title"] == "AI Team Meeting"
+    assert parameters["timezone"] == "Asia/Kolkata"
+    # Concrete ISO 8601 datetimes with the Asia/Kolkata offset, never the
+    # raw relative expression.
+    assert parameters["start_datetime"].endswith("+05:30")
+    assert parameters["end_datetime"].endswith("+05:30")
+    assert "T" in parameters["start_datetime"]
+
+
+def test_title_inference_and_datetime_enrichment_reach_the_n8n_payload(configured_settings):
+    # End-to-end regression for the exact reported request: the LLM leaves
+    # the title out and only gives a relative datetime; INFER_TITLES and
+    # ENRICH_DATETIME run at plan-generation time, but the adapter
+    # independently re-normalizes the raw "datetime" text at execution
+    # time - both paths must agree on "AI Team Meeting" and a concrete
+    # +05:30 datetime by the time n8n is called.
+    fake_client = FakeN8nClient(
+        result={"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"}
+    )
+    n8n_client.set_n8n_client(fake_client)
+
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "Create a meeting; the title was not provided.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"datetime": "tomorrow at 3 PM"},
+                "missing_information": ["title"],
+            }
+        ],
+    }
+    plan_response = _create_plan(raw_plan, text="Schedule a meeting with the AI team for tomorrow at 3 PM")
+    assert plan_response["execution_plan"]["status"] == "ready"
+    inferred_action = plan_response["execution_plan"]["actions"][0]
+    assert inferred_action["parameters"]["title"] == "AI Team Meeting"
+    assert inferred_action["parameters"]["resolved_datetime"].endswith("+05:30")
+
+    plan_id = plan_response["plan_id"]
+    assert client.post(f"/api/v1/plans/{plan_id}/approve").status_code == 200
+
+    response = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert response.status_code == 200
+    assert response.json()["status"] == "executed"
+
+    sent_parameters = fake_client.calls[0]["payload"]["action"]["parameters"]
+    assert sent_parameters["title"] == "AI Team Meeting"
+    assert sent_parameters["start_datetime"].endswith("+05:30")
+    assert "tomorrow" not in sent_parameters["start_datetime"]
+
+
+@pytest.mark.asyncio
 async def test_invalid_datetime_does_not_call_n8n(configured_settings):
     fake_client = FakeN8nClient()
     n8n_client.set_n8n_client(fake_client)
