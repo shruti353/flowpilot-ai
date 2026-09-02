@@ -124,6 +124,43 @@ def test_plan_endpoint_flags_missing_critical_information():
     assert body["plan_id"]
 
 
+def test_plan_endpoint_infers_title_when_llm_omits_it():
+    # Regression: reproduces the exact reported bug. The LLM (like a real
+    # Ollama model sometimes does) fails to infer the title itself and
+    # flags it as missing, even though "a meeting with the AI team" makes
+    # it derivable. The deterministic INFER_TITLES node must fill it in
+    # before validation so the plan comes back "ready", not
+    # "needs_clarification".
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "Create a meeting; the title was not provided.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"datetime": "tomorrow at 3 PM"},
+                "missing_information": ["title"],
+            }
+        ],
+    }
+    ollama_service.set_llm_provider(FakeProvider(result=raw_plan))
+
+    response = client.post(
+        "/api/v1/agent/plan",
+        json={"text": "Schedule a meeting with the AI team for tomorrow at 3 PM"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "awaiting_approval"
+    assert body["execution_plan"]["status"] == "ready"
+    action = body["execution_plan"]["actions"][0]
+    assert action["parameters"]["title"] == "AI Team Meeting"
+    assert action["parameters"]["datetime"] == "tomorrow at 3 PM"
+    assert action["missing_information"] == []
+
+
 def test_plan_endpoint_returns_502_when_llm_unreachable():
     ollama_service.set_llm_provider(FakeProvider(error=OllamaServiceError("connection refused")))
 
