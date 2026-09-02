@@ -1,8 +1,16 @@
 """Application configuration loaded from environment variables / .env file."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Resolve the project-root .env by this file's own location rather than the
+# process's current working directory - config.py lives at
+# backend/app/core/config.py, so the repo root is three parents up. This
+# makes env loading independent of where uvicorn/pytest/etc. is launched
+# from, and avoids ever needing a second .env under backend/.
+_REPO_ROOT_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
 
 class Settings(BaseSettings):
@@ -39,7 +47,7 @@ class Settings(BaseSettings):
     n8n_timeout_seconds: float = 30.0
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_REPO_ROOT_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )
