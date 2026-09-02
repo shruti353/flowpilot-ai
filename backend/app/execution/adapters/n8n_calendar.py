@@ -62,6 +62,11 @@ class N8nCalendarCreateEventAdapter(ExecutionAdapter):
                 "N8N_CALENDAR_WEBHOOK_URL (or N8N_BASE_URL) is not configured.",
             )
 
+        # Payload contract shared with workflows/flowpilot_google_calendar.json's
+        # "Validate Payload" node. n8n's Webhook node always nests this whole
+        # object under its own `.body` wrapper (alongside headers/params/query)
+        # before handing it to the next node - the workflow must read
+        # `$input.item.json.body`, not `$input.item.json`.
         payload = {
             "request_id": context.request_id,
             "plan_id": context.plan_id,
