@@ -1,4 +1,5 @@
 import type { Action, OperationName, ToolName } from "../types/plan";
+import { formatResolvedDatetime } from "../utils/datetime";
 
 const TOOL_ICONS: Record<ToolName, string> = {
   calendar: "📅",
@@ -20,13 +21,25 @@ function formatParamLabel(key: string): string {
   return key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, " ");
 }
 
+// The resolved datetime is shown as the "Datetime" row's value (in place
+// of the raw expression); it never gets its own separate row.
+function formatParamValue(key: string, value: unknown, parameters: Record<string, unknown>): string {
+  if (key === "datetime") {
+    const resolved = parameters.resolved_datetime;
+    if (typeof resolved === "string" && resolved) {
+      return formatResolvedDatetime(resolved);
+    }
+  }
+  return String(value);
+}
+
 interface ActionCardProps {
   action: Action;
   index: number;
 }
 
 export function ActionCard({ action, index }: ActionCardProps) {
-  const paramEntries = Object.entries(action.parameters);
+  const paramEntries = Object.entries(action.parameters).filter(([key]) => key !== "resolved_datetime");
 
   return (
     <li className="action-card">
@@ -44,7 +57,7 @@ export function ActionCard({ action, index }: ActionCardProps) {
           {paramEntries.map(([key, value]) => (
             <div className="action-card__param" key={key}>
               <dt>{formatParamLabel(key)}</dt>
-              <dd>{String(value)}</dd>
+              <dd>{formatParamValue(key, value, action.parameters)}</dd>
             </div>
           ))}
         </dl>
