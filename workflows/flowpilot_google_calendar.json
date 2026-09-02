@@ -18,13 +18,14 @@
     },
     {
       "parameters": {
-        "jsCode": "const body = $input.item.json;\nconst action = body.action || {};\nconst params = action.parameters || {};\n\nif (action.tool !== 'calendar' || action.operation !== 'create_event') {\n  throw new Error(`Unsupported action for this workflow: expected calendar.create_event, got ${action.tool}.${action.operation}`);\n}\nif (!params.title || !params.start_datetime) {\n  throw new Error('Missing required parameters: title and start_datetime are required');\n}\n\nreturn {\n  json: {\n    request_id: body.request_id,\n    plan_id: body.plan_id,\n    action_id: body.action_id,\n    title: params.title,\n    start_datetime: params.start_datetime,\n    end_datetime: params.end_datetime || params.start_datetime,\n    timezone: params.timezone || 'UTC',\n  },\n};"
+        "jsCode": "// Payload contract (see backend/app/execution/adapters/n8n_calendar.py):\n// POST body = { request_id, plan_id, action_id, action: { tool, operation, parameters: { title, start_datetime, end_datetime, timezone } } }.\n// The Webhook node always nests the actual POST body under `.body`\n// (alongside headers/params/query) - unwrap it here rather than treating\n// the whole wrapper as the payload.\nconst body = $input.item.json.body;\nconst action = body.action || {};\nconst params = action.parameters || {};\n\nif (action.tool !== 'calendar' || action.operation !== 'create_event') {\n  throw new Error(`Unsupported action for this workflow: expected calendar.create_event, got ${action.tool}.${action.operation}`);\n}\nif (!params.title || !params.start_datetime) {\n  throw new Error('Missing required parameters: title and start_datetime are required');\n}\n\nreturn {\n  json: {\n    request_id: body.request_id,\n    plan_id: body.plan_id,\n    action_id: body.action_id,\n    title: params.title,\n    start_datetime: params.start_datetime,\n    end_datetime: params.end_datetime || params.start_datetime,\n    timezone: params.timezone || 'UTC',\n  },\n};"
       },
       "id": "6f1e6f2a-1111-4a3b-9c1a-000000000002",
       "name": "Validate Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "onError": "continueErrorOutput",
+      "notes": "Expects the FlowPilot webhook POST body (nested under the Webhook node's .body) shaped as: { request_id, plan_id, action_id, action: { tool: 'calendar', operation: 'create_event', parameters: { title, start_datetime, end_datetime, timezone } } }. Outputs { title, start_datetime, end_datetime, timezone } consumed by the Google Calendar node below.",
       "position": [420, 300]
     },
     {
