@@ -17,19 +17,16 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-def infer_titles(state: AgentState) -> AgentState:
-    if state.get("errors"):
-        return state
+def apply_infer_titles(raw_plan: dict, user_text: str, request_id: str | None = None) -> dict:
+    """Pure transform: fills in an inferable calendar event title in place.
 
-    raw_plan = state.get("raw_plan")
-    if not isinstance(raw_plan, dict):
-        return state
-
+    Extracted so both the LangGraph node below and the deterministic
+    plan-update pipeline (used by POST /plans/{plan_id}/fields) can re-run
+    exactly this logic without duplicating it.
+    """
     actions = raw_plan.get("actions")
     if not isinstance(actions, list):
-        return state
-
-    user_text = state.get("user_text", "")
+        return raw_plan
 
     for action in actions:
         if not isinstance(action, dict):
@@ -53,7 +50,19 @@ def infer_titles(state: AgentState) -> AgentState:
 
         logger.info(
             "inferred calendar event title deterministically",
-            extra={"request_id": state.get("request_id")},
+            extra={"request_id": request_id},
         )
 
+    return raw_plan
+
+
+def infer_titles(state: AgentState) -> AgentState:
+    if state.get("errors"):
+        return state
+
+    raw_plan = state.get("raw_plan")
+    if not isinstance(raw_plan, dict):
+        return state
+
+    apply_infer_titles(raw_plan, state.get("user_text", ""), state.get("request_id"))
     return state
