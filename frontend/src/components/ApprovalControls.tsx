@@ -1,31 +1,46 @@
 import { useState } from "react";
-import type { StoredPlan } from "../types/plan";
+import type { ActionFieldValues, StoredPlan } from "../types/plan";
 import { ExecutionResult } from "./ExecutionResult";
+import { MissingFieldsForm } from "./MissingFieldsForm";
 
 interface ApprovalControlsProps {
   plan: StoredPlan;
   onApprove: () => void;
   onReject: (reason?: string) => void;
   onExecute: () => void;
+  onUpdateFields: (actions: ActionFieldValues[]) => void;
   isSubmitting: boolean;
   isExecuting: boolean;
+  isUpdatingFields: boolean;
 }
 
 const EXECUTION_STATUSES = new Set(["executing", "executed", "partially_executed", "execution_failed"]);
+const RETRYABLE_STATUSES = new Set(["partially_executed", "execution_failed"]);
 
 export function ApprovalControls({
   plan,
   onApprove,
   onReject,
   onExecute,
+  onUpdateFields,
   isSubmitting,
   isExecuting,
+  isUpdatingFields,
 }: ApprovalControlsProps) {
   const [reason, setReason] = useState("");
   const [isRejecting, setIsRejecting] = useState(false);
 
   if (EXECUTION_STATUSES.has(plan.status)) {
-    return <ExecutionResult plan={plan} />;
+    return (
+      <>
+        <ExecutionResult plan={plan} />
+        {RETRYABLE_STATUSES.has(plan.status) && (
+          <button type="button" className="btn btn--primary" disabled={isExecuting} onClick={onExecute}>
+            {isExecuting ? "Retrying..." : "Retry Execution"}
+          </button>
+        )}
+      </>
+    );
   }
 
   if (plan.status === "approved") {
@@ -64,12 +79,7 @@ export function ApprovalControls({
   }
 
   if (plan.status === "needs_clarification") {
-    return (
-      <div className="decision-result decision-result--warning">
-        This plan is missing required information and cannot be approved yet.
-        Try rephrasing your request with more detail (a title, a specific time, etc.).
-      </div>
-    );
+    return <MissingFieldsForm plan={plan} onSubmit={onUpdateFields} isSubmitting={isUpdatingFields} />;
   }
 
   if (plan.status === "error") {
