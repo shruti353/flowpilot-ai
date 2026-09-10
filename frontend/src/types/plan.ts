@@ -12,12 +12,23 @@ export type OperationName =
   | "send_email"
   | "search_email";
 
+export type FieldType = "text" | "date" | "time" | "datetime" | "number" | "select";
+
+export interface MissingFieldSpec {
+  field: string;
+  label: string;
+  type: FieldType;
+  required: boolean;
+  options: string[] | null;
+}
+
 export interface Action {
   action_id: string;
   tool: ToolName;
   operation: OperationName;
   parameters: Record<string, unknown>;
   missing_information: string[];
+  missing_fields: MissingFieldSpec[];
   requires_approval: boolean;
 }
 
@@ -58,9 +69,12 @@ export type ActionExecutionStatus =
   | "skipped"
   | "unsupported";
 
+export type ErrorStage = "validation" | "configuration" | "transport" | "workflow" | "unsupported";
+
 export interface ExecutionErrorDetail {
   code: string;
   message: string;
+  stage: ErrorStage;
 }
 
 export interface ActionExecutionResult {
@@ -70,6 +84,7 @@ export interface ActionExecutionResult {
   status: ActionExecutionStatus;
   result: Record<string, unknown> | null;
   error: ExecutionErrorDetail | null;
+  attempt_count: number;
 }
 
 export interface PlanExecutionResult {
@@ -125,5 +140,19 @@ export interface ExecutePlanResponse {
   status: StoredPlanStatus;
   message: string;
   execution: PlanExecutionResult | null;
+  plan: StoredPlan;
+}
+
+// --- Week 4: interactive missing-field collection ----------------------
+
+export interface ActionFieldValues {
+  action_id: string;
+  values: Record<string, unknown>;
+}
+
+export interface UpdatePlanFieldsResponse {
+  plan_id: string;
+  status: StoredPlanStatus;
+  message: string;
   plan: StoredPlan;
 }
