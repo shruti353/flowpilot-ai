@@ -28,6 +28,9 @@ from tests.conftest import FakeN8nClient, FakeProvider
 
 client = TestClient(app)
 
+# Title is given directly; date+time are resolved deterministically from
+# DEFAULT_TEXT below ("...tomorrow at 3 PM...") rather than from a "datetime"
+# parameter, which is no longer trusted from the LLM for create_event.
 VALID_RAW_PLAN = {
     "intent": "productivity_workflow",
     "summary": "Create a meeting and a preparation task.",
@@ -36,7 +39,7 @@ VALID_RAW_PLAN = {
             "action_id": "action_1",
             "tool": "calendar",
             "operation": "create_event",
-            "parameters": {"title": "AI Team Meeting", "datetime": "tomorrow at 3 PM"},
+            "parameters": {"title": "AI Team Meeting"},
             "missing_information": [],
         },
         {
@@ -57,7 +60,7 @@ CALENDAR_ONLY_RAW_PLAN = {
             "action_id": "action_1",
             "tool": "calendar",
             "operation": "create_event",
-            "parameters": {"title": "AI Team Meeting", "datetime": "tomorrow at 3 PM"},
+            "parameters": {"title": "AI Team Meeting"},
             "missing_information": [],
         }
     ],
@@ -71,14 +74,16 @@ NEEDS_CLARIFICATION_RAW_PLAN = {
             "action_id": "action_1",
             "tool": "calendar",
             "operation": "create_event",
-            "parameters": {"datetime": "tomorrow"},
+            "parameters": {},
             "missing_information": ["title"],
         }
     ],
 }
 
+DEFAULT_TEXT = "Schedule a meeting with the AI team tomorrow at 3 PM and create a task to prepare the demo."
 
-def _create_plan(raw_plan: dict, text: str = "irrelevant, provider is mocked") -> dict:
+
+def _create_plan(raw_plan: dict, text: str = DEFAULT_TEXT) -> dict:
     ollama_service.set_llm_provider(FakeProvider(result=raw_plan))
     response = client.post("/api/v1/agent/plan", json={"text": text})
     assert response.status_code == 200
@@ -419,7 +424,7 @@ def test_cancelled_plan_cannot_execute(configured_settings):
 
 
 def test_needs_clarification_plan_cannot_execute(configured_settings):
-    plan_id = _create_plan(NEEDS_CLARIFICATION_RAW_PLAN)["plan_id"]
+    plan_id = _create_plan(NEEDS_CLARIFICATION_RAW_PLAN, text="Schedule a meeting.")["plan_id"]
 
     response = client.post(f"/api/v1/plans/{plan_id}/execute")
 
@@ -479,3 +484,134 @@ def test_all_actions_failing_reports_execution_failed(configured_settings):
 def test_execute_unknown_plan_id_returns_404(configured_settings):
     response = client.post("/api/v1/plans/does-not-exist/execute")
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Week 4: idempotent retries - a succeeded action must never be re-sent to
+# n8n, but a failed/unsupported action may be retried.
+# ---------------------------------------------------------------------------
+
+
+def test_retry_of_partially_executed_plan_does_not_recall_n8n_for_the_succeeded_action(
+    configured_settings,
+):
+    fake_client = FakeN8nClient(
+        result={"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"}
+    )
+    n8n_client.set_n8n_client(fake_client)
+    plan_id = _create_and_approve_plan(VALID_RAW_PLAN)  # action_1 calendar, action_2 tasks (unsupported)
+
+    first = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert first.status_code == 200
+    assert first.json()["status"] == "partially_executed"
+    assert len(fake_client.calls) == 1
+
+    second = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert second.status_code == 200
+    body = second.json()
+    assert body["status"] == "partially_executed"
+
+    # The already-succeeded calendar action was never re-dispatched.
+    assert len(fake_client.calls) == 1
+
+    by_action_id = {a["action_id"]: a for a in body["execution"]["actions"]}
+    assert by_action_id["action_1"]["status"] == "succeeded"
+    assert by_action_id["action_1"]["attempt_count"] == 1
+    # The unsupported action has no adapter to retry against, but it IS
+    # re-attempted (attempt_count increments) rather than silently skipped.
+    assert by_action_id["action_2"]["status"] == "unsupported"
+    assert by_action_id["action_2"]["attempt_count"] == 2
+
+
+def test_retry_after_transient_n8n_failure_succeeds_and_increments_attempt_count(
+    configured_settings,
+):
+    failing_client = FakeN8nClient(
+        error=n8n_client.N8nWebhookError("N8N_UNREACHABLE", "connection refused")
+    )
+    n8n_client.set_n8n_client(failing_client)
+    plan_id = _create_and_approve_plan()  # CALENDAR_ONLY_RAW_PLAN
+
+    first = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert first.status_code == 200
+    assert first.json()["status"] == "execution_failed"
+    assert len(failing_client.calls) == 1
+
+    # Fix the outage, then retry the SAME plan.
+    succeeding_client = FakeN8nClient(
+        result={"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"}
+    )
+    n8n_client.set_n8n_client(succeeding_client)
+
+    second = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert second.status_code == 200
+    body = second.json()
+    assert body["status"] == "executed"
+    assert len(succeeding_client.calls) == 1  # exactly one retry call, not zero, not two
+
+    action = body["execution"]["actions"][0]
+    assert action["status"] == "succeeded"
+    assert action["attempt_count"] == 2  # one failed attempt + one successful retry
+
+
+def test_fully_executed_plan_cannot_be_retried(configured_settings):
+    n8n_client.set_n8n_client(
+        FakeN8nClient(result={"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"})
+    )
+    plan_id = _create_and_approve_plan()
+
+    assert client.post(f"/api/v1/plans/{plan_id}/execute").json()["status"] == "executed"
+
+    response = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert response.status_code == 409
+    assert response.json()["detail"]["current_status"] == "executed"
+
+
+# ---------------------------------------------------------------------------
+# Week 4: downstream error transparency (error.stage classification)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_missing_parameters_error_is_classified_as_validation_stage(configured_settings):
+    action = Action(action_id="action_1", tool="calendar", operation="create_event", parameters={})
+    result = await execute_action(action, ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.error.code == "MISSING_PARAMETERS"
+    assert result.error.stage == "validation"
+
+
+@pytest.mark.asyncio
+async def test_not_configured_error_is_classified_as_configuration_stage(unconfigured_settings):
+    result = await execute_action(_action(), ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.error.code == "N8N_NOT_CONFIGURED"
+    assert result.error.stage == "configuration"
+
+
+@pytest.mark.asyncio
+async def test_unreachable_error_is_classified_as_transport_stage(configured_settings):
+    n8n_client.set_n8n_client(
+        FakeN8nClient(error=n8n_client.N8nWebhookError("N8N_UNREACHABLE", "connection refused"))
+    )
+    result = await execute_action(_action(), ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.error.stage == "transport"
+
+
+@pytest.mark.asyncio
+async def test_n8n_reported_failure_is_classified_as_workflow_stage(configured_settings):
+    n8n_client.set_n8n_client(
+        FakeN8nClient(result={"success": False, "error_code": "CALENDAR_API_ERROR", "message": "quota exceeded"})
+    )
+    result = await execute_action(_action(), ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.error.stage == "workflow"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_action_error_is_classified_as_unsupported_stage(configured_settings):
+    action = Action(action_id="action_2", tool="tasks", operation="create_task", parameters={"title": "x"})
+    result = await execute_action(action, ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.error.stage == "unsupported"
