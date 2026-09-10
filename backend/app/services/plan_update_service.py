@@ -18,6 +18,7 @@ from app.core.config import get_settings
 from app.models.stored_plan import ActionFieldValues, StoredPlan, StoredPlanStatus
 from app.repositories.plan_repository import PlanRepository, get_plan_repository
 from app.services.approval_service import InvalidPlanTransitionError
+from app.services.contact_resolution_service import resolve_recipient_reference
 from app.services.plan_validation import validate_raw_plan
 
 #: The only status a plan may have its missing fields filled in from.
@@ -98,6 +99,33 @@ class PlanUpdateService:
                 # date/time picker, not free text) - no presence detection
                 # needed here, only resolution of whatever is now present.
                 resolve_calendar_datetime(parameters, get_settings().flowpilot_timezone)
+
+            if action.get("tool") == "email":
+                # Same deterministic resolution GENERATE_PLAN's
+                # RESOLVE_RECIPIENTS node already applies - a "to" value
+                # supplied here is still only ever a REFERENCE (a name, a
+                # team, or an email address), never trusted directly as an
+                # address.
+                to_value = parameters.get("to")
+                if isinstance(to_value, str) and to_value.strip():
+                    result = resolve_recipient_reference(to_value)
+                    hints = action.get("missing_field_hints")
+                    if not isinstance(hints, dict):
+                        hints = {}
+                    if result.resolved:
+                        parameters["resolved_recipients"] = [
+                            r.model_dump() for r in result.recipients
+                        ]
+                        if "to" in missing:
+                            missing.remove("to")
+                        hints.pop("to", None)
+                    else:
+                        parameters.pop("resolved_recipients", None)
+                        if "to" not in missing:
+                            missing.append("to")
+                        hints["to"] = result.reason
+                    action["missing_information"] = missing
+                    action["missing_field_hints"] = hints
 
         # Title inference is not re-run here - it depends on the original
         # free-text request, which this endpoint (structured field values,

@@ -13,7 +13,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.agent import router as agent_router
+from app.api.v1.contacts import router as contacts_router
 from app.api.v1.plans import router as plans_router
+from app.api.v1.teams import router as teams_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 
@@ -41,6 +43,8 @@ app.add_middleware(
 
 app.include_router(agent_router, prefix=settings.api_v1_prefix)
 app.include_router(plans_router, prefix=settings.api_v1_prefix)
+app.include_router(contacts_router, prefix=settings.api_v1_prefix)
+app.include_router(teams_router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/health", tags=["health"])

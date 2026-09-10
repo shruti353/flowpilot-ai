@@ -5,10 +5,12 @@ from app.agent.nodes.enrich_datetime import enrich_datetime
 from app.agent.nodes.filter_optional_fields import filter_optional_fields
 from app.agent.nodes.infer_titles import infer_titles
 from app.agent.nodes.plan import generate_plan
+from app.agent.nodes.resolve_recipients import resolve_recipients
 from app.agent.nodes.understand import understand_request
 from app.agent.nodes.validate import validate_plan
 from app.agent.state import initial_state
 from app.core.config import get_settings
+from app.repositories.contacts_repository import ContactsRepository
 from app.services.ollama_service import OllamaServiceError
 from app.utils.datetime_parser import normalize_datetime
 from tests.conftest import FakeProvider
@@ -661,3 +663,106 @@ def test_full_deterministic_chain_reaches_ready_despite_missing_location():
     assert action.parameters["title"] == "AI Team Meeting"
     assert action.parameters["resolved_datetime"] == expected_resolved
     assert "location" not in action.parameters
+
+
+# ---------------------------------------------------------------------------
+# RESOLVE_RECIPIENTS node (Week 5)
+# ---------------------------------------------------------------------------
+
+
+def _email_state(to_reference: str | None, missing: list[str] | None = None):
+    parameters: dict = {"subject": "Project update", "body": "See attached."}
+    if to_reference is not None:
+        parameters["to"] = to_reference
+
+    state = initial_state("req-1", "irrelevant - this node never reads user_text")
+    state["raw_plan"] = {
+        "intent": "productivity_workflow",
+        "summary": "Send an email.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "email",
+                "operation": "send_email",
+                "parameters": parameters,
+                "missing_information": missing or [],
+            }
+        ],
+    }
+    return state
+
+
+def test_resolve_recipients_resolves_a_known_team():
+    repo = ContactsRepository(":memory:")
+    adarsh = repo.create_contact("Adarsh", "adarsh@example.com")
+    rahul = repo.create_contact("Rahul", "rahul@example.com")
+    team = repo.create_team("AI Team")
+    repo.add_team_member(team.id, adarsh.id)
+    repo.add_team_member(team.id, rahul.id)
+    import app.repositories.contacts_repository as contacts_repository
+
+    contacts_repository.set_contacts_repository(repo)
+
+    state = _email_state("AI Team")
+    result = resolve_recipients(state)
+    action = result["raw_plan"]["actions"][0]
+
+    assert "to" not in action["missing_information"]
+    emails = {r["email"] for r in action["parameters"]["resolved_recipients"]}
+    assert emails == {"adarsh@example.com", "rahul@example.com"}
+    assert action["missing_field_hints"].get("to") is None
+
+
+def test_resolve_recipients_leaves_to_missing_with_a_hint_for_unknown_reference():
+    state = _email_state("Nonexistent Team")
+    result = resolve_recipients(state)
+    action = result["raw_plan"]["actions"][0]
+
+    assert action["missing_information"] == ["to"]
+    assert "resolved_recipients" not in action["parameters"]
+    assert "Nonexistent Team" in action["missing_field_hints"]["to"]
+
+
+def test_resolve_recipients_does_not_touch_missing_to_when_none_was_given():
+    # The LLM's own claim about whether "to" is present/missing is trusted
+    # as-is when no reference was supplied at all - only RESOLUTION of a
+    # stated reference is deterministic here.
+    state = _email_state(to_reference=None, missing=["to", "subject"])
+    result = resolve_recipients(state)
+    action = result["raw_plan"]["actions"][0]
+
+    assert action["missing_information"] == ["to", "subject"]
+    assert "resolved_recipients" not in action["parameters"]
+
+
+def test_resolve_recipients_ignores_non_email_actions():
+    state = initial_state("req-1", "Schedule a meeting tomorrow at 3 PM")
+    state["raw_plan"] = {
+        "intent": "productivity_workflow",
+        "summary": "Create a meeting.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "Sync", "date": "tomorrow", "time": "3pm"},
+                "missing_information": [],
+            }
+        ],
+    }
+
+    result = resolve_recipients(state)
+    action = result["raw_plan"]["actions"][0]
+
+    assert "resolved_recipients" not in action["parameters"]
+    assert action["missing_information"] == []
+
+
+def test_resolve_recipients_short_circuits_on_prior_error():
+    state = _email_state("AI Team")
+    state["errors"].append("boom")
+
+    result = resolve_recipients(state)
+    action = result["raw_plan"]["actions"][0]
+
+    assert "resolved_recipients" not in action["parameters"]

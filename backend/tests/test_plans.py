@@ -250,7 +250,7 @@ def test_missing_field_is_typed_for_the_frontend():
 
     assert action["missing_information"] == ["title"]
     assert action["missing_fields"] == [
-        {"field": "title", "label": "Title", "type": "text", "required": True, "options": None}
+        {"field": "title", "label": "Title", "type": "text", "required": True, "options": None, "hint": None}
     ]
 
 
@@ -443,7 +443,7 @@ def test_time_only_mentioned_leaves_only_date_missing():
     assert created["execution_plan"]["status"] == "needs_clarification"
     assert action["missing_information"] == ["date"]
     assert action["missing_fields"] == [
-        {"field": "date", "label": "Date", "type": "date", "required": True, "options": None}
+        {"field": "date", "label": "Date", "type": "date", "required": True, "options": None, "hint": None}
     ]
     assert "date" not in action["parameters"]
     assert "resolved_datetime" not in action["parameters"]
@@ -459,7 +459,7 @@ def test_date_only_mentioned_leaves_only_time_missing():
     assert created["execution_plan"]["status"] == "needs_clarification"
     assert action["missing_information"] == ["time"]
     assert action["missing_fields"] == [
-        {"field": "time", "label": "Time", "type": "time", "required": True, "options": None}
+        {"field": "time", "label": "Time", "type": "time", "required": True, "options": None, "hint": None}
     ]
     assert "time" not in action["parameters"]
     assert "resolved_datetime" not in action["parameters"]
@@ -515,6 +515,196 @@ def test_plan_with_no_date_or_time_can_be_completed_via_fields_and_approved():
     action = plan["execution_plan"]["actions"][0]
     assert action["missing_information"] == []
     assert action["parameters"]["resolved_datetime"] == "2026-09-15T10:00:00+05:30"
+
+    approve = client.post(f"/api/v1/plans/{plan_id}/approve")
+    assert approve.status_code == 200
+    assert approve.json()["status"] == "approved"
+
+
+# --- Week 5: multi-action plans + contacts/teams recipient resolution ---
+
+MULTI_ACTION_CALENDAR_EMAIL_RAW_PLAN = {
+    "intent": "productivity_workflow",
+    "summary": "Schedule a meeting and email the AI team.",
+    "actions": [
+        {
+            "action_id": "action_1",
+            "tool": "calendar",
+            "operation": "create_event",
+            "parameters": {"title": "AI Team Meeting"},
+            "missing_information": [],
+        },
+        {
+            "action_id": "action_2",
+            "tool": "email",
+            "operation": "send_email",
+            "parameters": {"to": "AI Team"},
+            "missing_information": ["subject", "body"],
+        },
+    ],
+}
+MULTI_ACTION_TEXT = (
+    "Schedule a meeting with the AI team tomorrow at 3 PM and send them an "
+    "email about the project update."
+)
+
+
+def test_two_action_plan_validates_each_action_independently():
+    # The team isn't saved yet - action_1 (calendar) has everything it
+    # needs; action_2 (email) is missing "to" (unresolved reference) as
+    # well as the subject/body the LLM already reported. Missing fields
+    # must never bleed between actions.
+    created = _create_plan(MULTI_ACTION_CALENDAR_EMAIL_RAW_PLAN, text=MULTI_ACTION_TEXT)
+
+    assert created["status"] == "needs_clarification"
+    actions = created["execution_plan"]["actions"]
+    assert len(actions) == 2
+
+    calendar_action = actions[0]
+    assert calendar_action["missing_information"] == []
+
+    email_action = actions[1]
+    assert set(email_action["missing_information"]) == {"to", "subject", "body"}
+    assert "No saved team or contact matches" in email_action["missing_field_hints"]["to"]
+    # The calendar action's completeness is untouched by the email action's gaps.
+    assert "to" not in calendar_action.get("missing_information", [])
+
+
+def test_three_action_plan_is_accepted():
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "Three things.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
+            },
+            {
+                "action_id": "action_2",
+                "tool": "tasks",
+                "operation": "create_task",
+                "parameters": {"title": "Prepare the demo"},
+                "missing_information": [],
+            },
+            {
+                "action_id": "action_3",
+                "tool": "email",
+                "operation": "send_email",
+                "parameters": {},
+                "missing_information": ["to", "subject", "body"],
+            },
+        ],
+    }
+
+    created = _create_plan(raw_plan, text=MULTI_ACTION_TEXT)
+
+    assert created["plan_id"]
+    assert len(created["execution_plan"]["actions"]) == 3
+
+
+def test_more_than_three_actions_is_rejected_deterministically_not_truncated():
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "Four things.",
+        "actions": [
+            {
+                "action_id": f"action_{i}",
+                "tool": "tasks",
+                "operation": "create_task",
+                "parameters": {"title": f"Task {i}"},
+                "missing_information": [],
+            }
+            for i in range(1, 5)
+        ],
+    }
+
+    created = _create_plan(raw_plan)
+
+    # Rejected outright (status "error", nothing executable) - never
+    # silently truncated to the first 3.
+    assert created["status"] == "error"
+    assert created["execution_plan"] is None
+    assert any("exceeds the maximum" in e["message"] for e in created["errors"])
+
+
+def test_malformed_plan_missing_actions_key_is_rejected():
+    raw_plan = {"intent": "productivity_workflow", "summary": "No actions key at all."}
+    created = _create_plan(raw_plan)
+    assert created["status"] == "error"
+
+
+def test_unsupported_action_within_a_multi_action_plan_is_rejected():
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "One good action, one bad one.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
+            },
+            {
+                "action_id": "action_2",
+                "tool": "slack",
+                "operation": "send_message",
+                "parameters": {},
+                "missing_information": [],
+            },
+        ],
+    }
+
+    created = _create_plan(raw_plan, text=MULTI_ACTION_TEXT)
+
+    assert created["status"] == "error"
+    assert created["execution_plan"] is None
+
+
+def test_saving_a_team_then_filling_email_fields_reaches_awaiting_approval():
+    # Full loop: plan created with an unresolvable "AI Team" reference ->
+    # the team is saved via the Contacts/Teams API -> resubmitting the
+    # SAME reference through /fields now resolves it -> plan reaches
+    # awaiting_approval, same plan_id throughout, approval still required.
+    created = _create_plan(MULTI_ACTION_CALENDAR_EMAIL_RAW_PLAN, text=MULTI_ACTION_TEXT)
+    plan_id = created["plan_id"]
+    assert created["status"] == "needs_clarification"
+
+    team = client.post("/api/v1/teams", json={"name": "AI Team"}).json()
+    for name, email in [("Adarsh", "adarsh@example.com"), ("Rahul", "rahul@example.com")]:
+        client.post(
+            f"/api/v1/teams/{team['id']}/members", json={"name": name, "email": email}
+        )
+
+    response = client.post(
+        f"/api/v1/plans/{plan_id}/fields",
+        json={
+            "actions": [
+                {
+                    "action_id": "action_2",
+                    "values": {
+                        "to": "AI Team",
+                        "subject": "Project update",
+                        "body": "Here is the latest status.",
+                    },
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "awaiting_approval"
+    plan = body["plan"]
+    assert plan["plan_id"] == plan_id  # same plan throughout
+
+    email_action = plan["execution_plan"]["actions"][1]
+    assert email_action["missing_information"] == []
+    resolved_emails = {r["email"] for r in email_action["parameters"]["resolved_recipients"]}
+    assert resolved_emails == {"adarsh@example.com", "rahul@example.com"}
 
     approve = client.post(f"/api/v1/plans/{plan_id}/approve")
     assert approve.status_code == 200

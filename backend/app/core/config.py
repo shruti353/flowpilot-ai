@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # makes env loading independent of where uvicorn/pytest/etc. is launched
 # from, and avoids ever needing a second .env under backend/.
 _REPO_ROOT_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+_REPO_ROOT_CONTACTS_DB_FILE = Path(__file__).resolve().parents[3] / "flowpilot_contacts.db"
 
 
 class Settings(BaseSettings):
@@ -45,6 +46,12 @@ class Settings(BaseSettings):
     n8n_calendar_webhook_path: str = "/webhook/flowpilot-calendar"
     n8n_calendar_webhook_url: str | None = None
     n8n_timeout_seconds: float = 30.0
+
+    # --- Week 5: contacts/teams -------------------------------------------
+    # SQLite file backing persistent Contacts/Teams storage - survives a
+    # backend restart, unlike the in-memory PlanRepository. Never committed
+    # (see .gitignore) - it holds real user contact data.
+    contacts_db_path: str = str(_REPO_ROOT_CONTACTS_DB_FILE)
 
     model_config = SettingsConfigDict(
         env_file=_REPO_ROOT_ENV_FILE,

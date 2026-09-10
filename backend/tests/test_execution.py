@@ -90,8 +90,8 @@ def _create_plan(raw_plan: dict, text: str = DEFAULT_TEXT) -> dict:
     return response.json()
 
 
-def _create_and_approve_plan(raw_plan: dict = CALENDAR_ONLY_RAW_PLAN) -> str:
-    plan_id = _create_plan(raw_plan)["plan_id"]
+def _create_and_approve_plan(raw_plan: dict = CALENDAR_ONLY_RAW_PLAN, text: str = DEFAULT_TEXT) -> str:
+    plan_id = _create_plan(raw_plan, text=text)["plan_id"]
     approve_response = client.post(f"/api/v1/plans/{plan_id}/approve")
     assert approve_response.status_code == 200
     return plan_id
@@ -615,3 +615,77 @@ async def test_unsupported_action_error_is_classified_as_unsupported_stage(confi
     result = await execute_action(action, ExecutionContext(request_id="r1", plan_id="p1"))
 
     assert result.error.stage == "unsupported"
+
+
+# ---------------------------------------------------------------------------
+# Week 5: multi-action plans - email has no execution adapter yet (by
+# design - no unsafe fake execution path was built), calendar still
+# executes and retries independently.
+# ---------------------------------------------------------------------------
+
+
+CALENDAR_AND_EMAIL_RAW_PLAN = {
+    "intent": "productivity_workflow",
+    "summary": "Schedule a meeting and email about it.",
+    "actions": [
+        {
+            "action_id": "action_1",
+            "tool": "calendar",
+            "operation": "create_event",
+            "parameters": {"title": "AI Team Meeting"},
+            "missing_information": [],
+        },
+        {
+            "action_id": "action_2",
+            "tool": "email",
+            "operation": "send_email",
+            "parameters": {"to": "adarsh@example.com", "subject": "Update", "body": "Hi"},
+            "missing_information": [],
+        },
+    ],
+}
+CALENDAR_AND_EMAIL_TEXT = "Schedule a meeting with the AI team tomorrow at 3 PM and email adarsh@example.com about it."
+
+
+def test_email_action_is_unsupported_and_does_not_block_calendar_execution(configured_settings):
+    n8n_client.set_n8n_client(
+        FakeN8nClient(result={"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"})
+    )
+    plan_id = _create_and_approve_plan(CALENDAR_AND_EMAIL_RAW_PLAN, text=CALENDAR_AND_EMAIL_TEXT)
+
+    response = client.post(f"/api/v1/plans/{plan_id}/execute")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "partially_executed"
+
+    by_action_id = {a["action_id"]: a for a in body["execution"]["actions"]}
+    assert by_action_id["action_1"]["status"] == "succeeded"
+    assert by_action_id["action_2"]["status"] == "unsupported"
+    assert by_action_id["action_2"]["error"]["code"] == "EXECUTION_NOT_SUPPORTED"
+
+
+def test_retrying_calendar_and_email_plan_never_recalls_n8n_for_the_succeeded_calendar_action(
+    configured_settings,
+):
+    fake_client = FakeN8nClient(
+        result={"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"}
+    )
+    n8n_client.set_n8n_client(fake_client)
+    plan_id = _create_and_approve_plan(CALENDAR_AND_EMAIL_RAW_PLAN, text=CALENDAR_AND_EMAIL_TEXT)
+
+    first = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert first.status_code == 200
+    assert first.json()["status"] == "partially_executed"
+    assert len(fake_client.calls) == 1
+
+    second = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert second.status_code == 200
+    body = second.json()
+    assert body["status"] == "partially_executed"
+
+    # The already-succeeded calendar action was never re-dispatched to n8n.
+    assert len(fake_client.calls) == 1
+    by_action_id = {a["action_id"]: a for a in body["execution"]["actions"]}
+    assert by_action_id["action_1"]["attempt_count"] == 1
+    assert by_action_id["action_2"]["attempt_count"] == 2

@@ -2,6 +2,8 @@ import pytest
 
 import app.execution.n8n_client as n8n_client
 import app.services.ollama_service as ollama_service
+import app.repositories.contacts_repository as contacts_repository
+from app.repositories.contacts_repository import ContactsRepository
 from app.repositories.plan_repository import get_plan_repository
 
 
@@ -25,6 +27,15 @@ def reset_n8n_client_override():
     """Ensure no test's fake n8n client leaks into the next test."""
     yield
     n8n_client.set_n8n_client(None)
+
+
+@pytest.fixture(autouse=True)
+def reset_contacts_repository():
+    """Give every test a fresh, empty, in-memory Contacts/Teams store -
+    never the real file-backed one from app/core/config.py's default."""
+    contacts_repository.set_contacts_repository(ContactsRepository(":memory:"))
+    yield
+    contacts_repository.set_contacts_repository(None)
 
 
 class FakeProvider:

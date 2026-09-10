@@ -33,3 +33,11 @@ class MissingFieldSpec(BaseModel):
         default=None,
         description="Allowed values, present only when type is 'select'.",
     )
+    hint: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable reason this field is still missing, when deterministic "
+            "resolution attempted and failed (e.g. 'No saved team or contact matches "
+            "\"AI Team\".'). None when nothing has attempted resolution yet."
+        ),
+    )

@@ -63,6 +63,14 @@ class Action(BaseModel):
             "from (tool, operation, field name), never set directly by the LLM."
         ),
     )
+    missing_field_hints: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional field_name -> human-readable reason, populated by deterministic "
+            "resolution steps (e.g. RESOLVE_RECIPIENTS) when they attempted and failed "
+            "to resolve a field's value. Empty for actions no such step ever touches."
+        ),
+    )
     requires_approval: bool = Field(
         default=True,
         description="Week 1 never executes actions; this is always expected to be true.",
@@ -92,6 +100,7 @@ class Action(BaseModel):
                     label=label,
                     type=field_type,
                     options=list(options) if options else None,
+                    hint=self.missing_field_hints.get(name),
                 )
             )
         self.missing_fields = fields
