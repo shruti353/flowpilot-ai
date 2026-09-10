@@ -34,7 +34,11 @@ class OllamaProvider:
 
     async def generate_json(self, user_text: str) -> Any:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+            # trust_env=False: httpx otherwise honors HTTP_PROXY/HTTPS_PROXY/
+            # NO_PROXY (and similar) from the process environment, which can
+            # route this local Ollama call through a system proxy and make
+            # an otherwise-reachable http://127.0.0.1:11434 fail to connect.
+            async with httpx.AsyncClient(timeout=self._timeout_seconds, trust_env=False) as client:
                 response = await client.post(
                     f"{self._base_url}/api/generate",
                     json={
