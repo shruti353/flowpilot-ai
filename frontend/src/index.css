@@ -413,6 +413,11 @@ body {
   color: var(--text-muted);
 }
 
+.missing-fields-form__hint {
+  color: var(--warning);
+  font-size: 0.8rem;
+}
+
 .missing-fields-form__field input,
 .missing-fields-form__field select {
   padding: 0.5rem 0.7rem;

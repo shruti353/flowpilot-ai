@@ -117,3 +117,44 @@ def test_llm_supplied_raw_email_is_never_trusted_without_going_through_resolutio
     made_up_name_result = resolve_recipient_reference("Totally Made Up Person", repo)
     assert made_up_name_result.resolved is False
     assert made_up_name_result.recipients == []
+
+
+# --- Week 5 Day 2: resolution reflects live contact/team state ---------
+
+
+def test_team_matching_is_case_insensitive_without_a_leading_article(repo):
+    # "AI Team" was created; a bare lowercase reference with no "the" must
+    # still match - distinct from the "the AI team" leading-article case
+    # already covered above.
+    result = resolve_recipient_reference("ai team", repo)
+    assert result.resolved is True
+
+
+def test_resolution_no_longer_includes_a_removed_team_member(repo):
+    team = repo.find_team_by_name("AI Team")
+    adarsh = repo.find_contacts_by_name("Adarsh")[0]
+    repo.remove_team_member(team.id, adarsh.id)
+
+    result = resolve_recipient_reference("AI Team", repo)
+
+    assert result.resolved is True
+    assert [r.email for r in result.recipients] == ["rahul@example.com"]
+
+
+def test_resolution_stops_finding_a_deleted_contact(repo):
+    adarsh = repo.find_contacts_by_name("Adarsh")[0]
+    repo.delete_contact(adarsh.id)
+
+    result = resolve_recipient_reference("Adarsh", repo)
+
+    assert result.resolved is False
+
+
+def test_resolution_stops_finding_a_deleted_team(repo):
+    team = repo.find_team_by_name("AI Team")
+    repo.delete_team(team.id)
+
+    result = resolve_recipient_reference("AI Team", repo)
+
+    assert result.resolved is False
+    assert "No saved team or contact matches" in result.reason

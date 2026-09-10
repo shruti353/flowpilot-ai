@@ -10,6 +10,9 @@ import pytest
 from app.repositories.contacts_repository import (
     ContactNotFoundError,
     ContactsRepository,
+    DuplicateEmailError,
+    DuplicateTeamNameError,
+    MembershipNotFoundError,
     TeamNotFoundError,
 )
 
@@ -158,9 +161,168 @@ def test_team_with_no_members_returns_empty_list(repo):
     assert repo.list_team_members(team.id) == []
 
 
-def _all_team_ids(repo: ContactsRepository) -> set[int]:
-    # No list_teams() on the repository yet (not needed by any current
-    # caller) - this test only needs to confirm no second row was created.
-    with repo._connect() as conn:  # noqa: SLF001 - test-only introspection
-        rows = conn.execute("SELECT id FROM teams").fetchall()
-    return {row["id"] for row in rows}
+# --- Week 5 Day 2: delete/rename/remove-member -----------------------------
+
+
+def test_delete_contact_removes_it(repo):
+    contact = repo.create_contact("Adarsh", "adarsh@example.com")
+
+    repo.delete_contact(contact.id)
+
+    with pytest.raises(ContactNotFoundError):
+        repo.get_contact(contact.id)
+
+
+def test_delete_unknown_contact_raises(repo):
+    with pytest.raises(ContactNotFoundError):
+        repo.delete_contact(999)
+
+
+def test_deleting_a_contact_removes_their_team_membership_no_orphans(repo):
+    team = repo.create_team("AI Team")
+    adarsh = repo.create_contact("Adarsh", "adarsh@example.com")
+    rahul = repo.create_contact("Rahul", "rahul@example.com")
+    repo.add_team_member(team.id, adarsh.id)
+    repo.add_team_member(team.id, rahul.id)
+
+    repo.delete_contact(adarsh.id)
+
+    remaining = repo.list_team_members(team.id)
+    assert [c.id for c in remaining] == [rahul.id]
+
+
+def test_update_contact_email_to_a_different_contacts_email_raises(repo):
+    repo.create_contact("Adarsh", "adarsh@example.com")
+    rahul = repo.create_contact("Rahul", "rahul@example.com")
+
+    with pytest.raises(DuplicateEmailError):
+        repo.update_contact(rahul.id, email="adarsh@example.com")
+
+    # Rejected update must not have partially applied.
+    assert repo.get_contact(rahul.id).email == "rahul@example.com"
+
+
+def test_update_contact_email_case_change_of_its_own_email_is_allowed(repo):
+    contact = repo.create_contact("Adarsh", "adarsh@example.com")
+
+    updated = repo.update_contact(contact.id, email="ADARSH@example.com")
+
+    assert updated.email == "ADARSH@example.com"
+
+
+def test_list_teams_returns_all(repo):
+    repo.create_team("AI Team")
+    repo.create_team("Sales Team")
+
+    names = {t.name for t in repo.list_teams()}
+    assert names == {"AI Team", "Sales Team"}
+
+
+def test_rename_team(repo):
+    team = repo.create_team("AI Team")
+
+    renamed = repo.update_team_name(team.id, "AI Research Team")
+
+    assert renamed.name == "AI Research Team"
+    assert repo.get_team(team.id).name == "AI Research Team"
+
+
+def test_rename_unknown_team_raises(repo):
+    with pytest.raises(TeamNotFoundError):
+        repo.update_team_name(999, "New Name")
+
+
+def test_rename_team_to_a_name_already_used_by_another_team_raises(repo):
+    repo.create_team("AI Team")
+    sales = repo.create_team("Sales Team")
+
+    with pytest.raises(DuplicateTeamNameError):
+        repo.update_team_name(sales.id, "AI Team")
+
+    assert repo.get_team(sales.id).name == "Sales Team"  # unchanged
+
+
+def test_renaming_a_team_to_its_own_current_name_is_allowed(repo):
+    team = repo.create_team("AI Team")
+    renamed = repo.update_team_name(team.id, "AI Team")
+    assert renamed.name == "AI Team"
+
+
+def test_delete_team_removes_it(repo):
+    team = repo.create_team("AI Team")
+
+    repo.delete_team(team.id)
+
+    with pytest.raises(TeamNotFoundError):
+        repo.get_team(team.id)
+
+
+def test_delete_unknown_team_raises(repo):
+    with pytest.raises(TeamNotFoundError):
+        repo.delete_team(999)
+
+
+def test_deleting_a_team_removes_its_memberships_no_orphans(repo):
+    team = repo.create_team("AI Team")
+    adarsh = repo.create_contact("Adarsh", "adarsh@example.com")
+    repo.add_team_member(team.id, adarsh.id)
+
+    repo.delete_team(team.id)
+
+    # The contact itself must survive - only the membership link is gone.
+    assert repo.get_contact(adarsh.id) is not None
+    other_team = repo.create_team("Other Team")
+    assert repo.list_team_members(other_team.id) == []
+
+
+def test_is_team_member(repo):
+    team = repo.create_team("AI Team")
+    adarsh = repo.create_contact("Adarsh", "adarsh@example.com")
+    rahul = repo.create_contact("Rahul", "rahul@example.com")
+    repo.add_team_member(team.id, adarsh.id)
+
+    assert repo.is_team_member(team.id, adarsh.id) is True
+    assert repo.is_team_member(team.id, rahul.id) is False
+
+
+def test_remove_team_member(repo):
+    team = repo.create_team("AI Team")
+    adarsh = repo.create_contact("Adarsh", "adarsh@example.com")
+    rahul = repo.create_contact("Rahul", "rahul@example.com")
+    repo.add_team_member(team.id, adarsh.id)
+    repo.add_team_member(team.id, rahul.id)
+
+    repo.remove_team_member(team.id, adarsh.id)
+
+    remaining = {c.id for c in repo.list_team_members(team.id)}
+    assert remaining == {rahul.id}
+
+
+def test_remove_team_member_not_on_the_team_raises(repo):
+    team = repo.create_team("AI Team")
+    adarsh = repo.create_contact("Adarsh", "adarsh@example.com")
+
+    with pytest.raises(MembershipNotFoundError):
+        repo.remove_team_member(team.id, adarsh.id)
+
+
+def test_remove_team_member_twice_raises_the_second_time(repo):
+    team = repo.create_team("AI Team")
+    adarsh = repo.create_contact("Adarsh", "adarsh@example.com")
+    repo.add_team_member(team.id, adarsh.id)
+
+    repo.remove_team_member(team.id, adarsh.id)
+    with pytest.raises(MembershipNotFoundError):
+        repo.remove_team_member(team.id, adarsh.id)
+
+
+def test_remove_member_from_unknown_team_raises(repo):
+    adarsh = repo.create_contact("Adarsh", "adarsh@example.com")
+    with pytest.raises(TeamNotFoundError):
+        repo.remove_team_member(999, adarsh.id)
+
+
+def test_remove_unknown_contact_from_team_raises(repo):
+    team = repo.create_team("AI Team")
+    with pytest.raises(ContactNotFoundError):
+        repo.remove_team_member(team.id, 999)

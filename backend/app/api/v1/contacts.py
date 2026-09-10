@@ -8,7 +8,11 @@ reads from the same store, never the LLM.
 from fastapi import APIRouter, HTTPException
 
 from app.models.contact import Contact, CreateContactRequest, UpdateContactRequest
-from app.repositories.contacts_repository import ContactNotFoundError, get_contacts_repository
+from app.repositories.contacts_repository import (
+    ContactNotFoundError,
+    DuplicateEmailError,
+    get_contacts_repository,
+)
 
 router = APIRouter(prefix="/contacts", tags=["contacts"])
 
@@ -41,5 +45,15 @@ async def update_contact(contact_id: int, payload: UpdateContactRequest) -> Cont
         return get_contacts_repository().update_contact(
             contact_id, name=payload.name, email=payload.email
         )
+    except ContactNotFoundError as exc:
+        raise _not_found(contact_id) from exc
+    except DuplicateEmailError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.delete("/{contact_id}", status_code=204)
+async def delete_contact(contact_id: int) -> None:
+    try:
+        get_contacts_repository().delete_contact(contact_id)
     except ContactNotFoundError as exc:
         raise _not_found(contact_id) from exc

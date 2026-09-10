@@ -20,6 +20,10 @@ export interface MissingFieldSpec {
   type: FieldType;
   required: boolean;
   options: string[] | null;
+  // Week 5: why this field is still missing, when a deterministic
+  // resolution step (e.g. recipient lookup) attempted and failed - e.g.
+  // "No saved team or contact matches 'AI Team'." Null otherwise.
+  hint: string | null;
 }
 
 export interface Action {

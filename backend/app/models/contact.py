@@ -58,6 +58,10 @@ class CreateTeamRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
 
 
+class UpdateTeamRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
 class AddTeamMemberRequest(BaseModel):
     """Either reference an existing contact by id, or create-or-reuse one
     inline by name+email in the same call (supports "my AI team members are

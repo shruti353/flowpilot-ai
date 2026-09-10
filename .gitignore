@@ -1,3 +1,6 @@
 .env
 
 .venv
+
+# Local contacts/teams SQLite store - user data, never committed.
+*.db

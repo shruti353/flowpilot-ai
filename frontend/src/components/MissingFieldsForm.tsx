@@ -144,6 +144,7 @@ export function MissingFieldsForm({ plan, onSubmit, isSubmitting }: MissingField
                 value={valuesByAction[action.action_id] ?? {}}
                 onChange={(patch) => handleFieldChange(action.action_id, patch)}
               />
+              {field.hint && <small className="missing-fields-form__hint">{field.hint}</small>}
             </label>
           ))}
         </fieldset>

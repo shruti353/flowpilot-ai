@@ -69,6 +69,37 @@ class TeamNotFoundError(Exception):
         super().__init__(f"No team found with id {team_id}.")
 
 
+class MembershipNotFoundError(Exception):
+    """Raised when removing a member who isn't (or is no longer) on the team."""
+
+    def __init__(self, team_id: int, contact_id: int) -> None:
+        self.team_id = team_id
+        self.contact_id = contact_id
+        super().__init__(f"Contact {contact_id} is not a member of team {team_id}.")
+
+
+class DuplicateEmailError(Exception):
+    """Raised only by update_contact - create_contact itself is idempotent-by-
+    email (see module docstring) and never raises this. Renaming an existing
+    contact's email onto one already used by a DIFFERENT contact has no safe
+    idempotent interpretation, unlike creation, so it's rejected outright
+    instead of silently merging two contacts or letting a raw UNIQUE-
+    constraint IntegrityError leak to callers."""
+
+    def __init__(self, email: str) -> None:
+        self.email = email
+        super().__init__(f"A contact with email '{email}' already exists.")
+
+
+class DuplicateTeamNameError(Exception):
+    """Raised only by update_team_name - see DuplicateEmailError for why
+    rename (unlike create_team's idempotent reuse) must reject a collision."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        super().__init__(f"A team named '{name}' already exists.")
+
+
 class ContactsRepository:
     def __init__(self, db_path: str = ":memory:") -> None:
         self._db_path = db_path
@@ -151,12 +182,25 @@ class ContactsRepository:
         current = self.get_contact(contact_id)
         new_name = name.strip() if name is not None else current.name
         new_email = email.strip() if email is not None else current.email
+
+        if new_email.casefold() != current.email.casefold():
+            colliding = self.find_contact_by_email(new_email)
+            if colliding is not None and colliding.id != contact_id:
+                raise DuplicateEmailError(new_email)
+
         with self._connect() as conn:
             conn.execute(
                 "UPDATE contacts SET name = ?, email = ? WHERE id = ?",
                 (new_name, new_email, contact_id),
             )
         return Contact(id=contact_id, name=new_name, email=new_email)
+
+    def delete_contact(self, contact_id: int) -> None:
+        self.get_contact(contact_id)  # 404s cleanly if it doesn't exist
+        with self._connect() as conn:
+            # ON DELETE CASCADE (team_members.contact_id) removes this
+            # contact's memberships automatically - no orphaned rows.
+            conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
 
     # --- Teams ----------------------------------------------------------
 
@@ -181,6 +225,30 @@ class ContactsRepository:
             raise TeamNotFoundError(team_id)
         return Team(id=row["id"], name=row["name"])
 
+    def list_teams(self) -> list[Team]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, name FROM teams ORDER BY id").fetchall()
+        return [Team(id=row["id"], name=row["name"]) for row in rows]
+
+    def update_team_name(self, team_id: int, name: str) -> Team:
+        self.get_team(team_id)  # 404s cleanly if it doesn't exist
+        name = name.strip()
+
+        existing = self.find_team_by_name(name)
+        if existing is not None and existing.id != team_id:
+            raise DuplicateTeamNameError(name)
+
+        with self._connect() as conn:
+            conn.execute("UPDATE teams SET name = ? WHERE id = ?", (name, team_id))
+        return Team(id=team_id, name=name)
+
+    def delete_team(self, team_id: int) -> None:
+        self.get_team(team_id)  # 404s cleanly if it doesn't exist
+        with self._connect() as conn:
+            # ON DELETE CASCADE (team_members.team_id) removes this team's
+            # memberships automatically - no orphaned rows.
+            conn.execute("DELETE FROM teams WHERE id = ?", (team_id,))
+
     def find_team_by_name(self, name: str) -> Team | None:
         normalized = normalize_team_name(name)
         with self._connect() as conn:
@@ -198,6 +266,26 @@ class ContactsRepository:
         with self._connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO team_members (team_id, contact_id) VALUES (?, ?)",
+                (team_id, contact_id),
+            )
+
+    def is_team_member(self, team_id: int, contact_id: int) -> bool:
+        self.get_team(team_id)  # 404s cleanly if it doesn't exist
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM team_members WHERE team_id = ? AND contact_id = ?",
+                (team_id, contact_id),
+            ).fetchone()
+        return row is not None
+
+    def remove_team_member(self, team_id: int, contact_id: int) -> None:
+        self.get_team(team_id)
+        self.get_contact(contact_id)
+        if not self.is_team_member(team_id, contact_id):
+            raise MembershipNotFoundError(team_id, contact_id)
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM team_members WHERE team_id = ? AND contact_id = ?",
                 (team_id, contact_id),
             )
 
