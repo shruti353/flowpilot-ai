@@ -2,16 +2,24 @@
 
 Approving a plan only changes its status (see approval_service.py) - it
 never runs anything. This module is what actually runs a plan's actions,
-exactly once, and only for a plan currently in "approved" status. It
-never talks to the LLM and never talks to Google Calendar directly; each
-action is delegated to app/execution/executor.py, which picks an adapter
-via the dispatcher in app/execution/dispatcher.py.
+delegating each one to app/execution/executor.py, which picks an adapter via
+the dispatcher in app/execution/dispatcher.py. It never talks to the LLM and
+never talks to Google Calendar directly.
 
-Duplicate-execution safety: claiming a plan (approved -> executing) is a
-single atomic compare-and-swap against the repository (see
-PlanRepository.compare_and_update). Once claimed, no other request can
-also claim it - a second /execute call always sees a non-"approved"
+Duplicate-execution safety: claiming a plan (one of EXECUTABLE_STATUSES ->
+executing) is a single atomic compare-and-swap against the repository (see
+PlanRepository.compare_and_update). Once claimed, no other request can also
+claim it - a second concurrent /execute call always sees a non-executable
 status and is rejected before any adapter or n8n call happens.
+
+Idempotent retries: a plan that came back "partially_executed" or
+"execution_failed" may be executed again (an "executed" plan may not - every
+action already succeeded, there is nothing to retry). On a retry, any action
+whose PREVIOUS attempt already succeeded is carried forward as-is and is
+NEVER re-dispatched to its adapter - this is what guarantees a retry cannot
+create a second Google Calendar event for an action that already created
+one. Only actions that previously failed, were unsupported, or have never
+been attempted are (re-)executed.
 """
 
 from datetime import datetime, timezone
@@ -23,8 +31,11 @@ from app.models.stored_plan import StoredPlan, StoredPlanStatus
 from app.repositories.plan_repository import PlanConflictError, PlanRepository, get_plan_repository
 from app.services.approval_service import InvalidPlanTransitionError
 
-#: The only status a plan may be executed from.
-EXECUTABLE_STATUS = StoredPlanStatus.approved
+#: Statuses a plan may be (re-)executed from. "executed" is deliberately
+#: excluded - every action already succeeded, so there is nothing to retry.
+EXECUTABLE_STATUSES = frozenset(
+    {StoredPlanStatus.approved, StoredPlanStatus.partially_executed, StoredPlanStatus.execution_failed}
+)
 
 
 def _utcnow() -> datetime:
@@ -66,9 +77,23 @@ class ExecutionService:
             )
 
         context = ExecutionContext(request_id=request_id, plan_id=plan_id)
-        action_results: list[ActionExecutionResult] = [
-            await execute_action(action, context) for action in plan.execution_plan.actions
-        ]
+        previous_by_action_id = {
+            result.action_id: result for result in (plan.execution.actions if plan.execution else [])
+        }
+
+        action_results: list[ActionExecutionResult] = []
+        for action in plan.execution_plan.actions:
+            previous = previous_by_action_id.get(action.action_id)
+            if previous is not None and previous.status == ActionExecutionStatus.succeeded:
+                # Already succeeded on an earlier attempt - never re-dispatch
+                # it, or a retry could create a second real side effect
+                # (e.g. a duplicate Google Calendar event).
+                action_results.append(previous)
+                continue
+
+            result = await execute_action(action, context)
+            attempt_count = previous.attempt_count + 1 if previous is not None else 1
+            action_results.append(result.model_copy(update={"attempt_count": attempt_count}))
 
         overall_status, outcome = _summarize(action_results)
         updated = plan.model_copy(
@@ -82,7 +107,7 @@ class ExecutionService:
 
     def _claim_for_execution(self, plan_id: str) -> StoredPlan:
         def predicate(plan: StoredPlan) -> bool:
-            return plan.status == EXECUTABLE_STATUS
+            return plan.status in EXECUTABLE_STATUSES
 
         def claim(plan: StoredPlan) -> StoredPlan:
             return plan.model_copy(
@@ -92,12 +117,13 @@ class ExecutionService:
         try:
             return self._repository.compare_and_update(plan_id, predicate, claim)
         except PlanConflictError as exc:
+            allowed = ", ".join(sorted(status.value for status in EXECUTABLE_STATUSES))
             raise InvalidPlanTransitionError(
                 plan_id,
                 exc.current_status,
                 f"Plan '{plan_id}' cannot be executed from status "
-                f"'{exc.current_status.value}'. Only plans in "
-                f"'{EXECUTABLE_STATUS.value}' may be executed.",
+                f"'{exc.current_status.value}'. Only plans in one of "
+                f"[{allowed}] may be executed.",
             ) from exc
 
 
