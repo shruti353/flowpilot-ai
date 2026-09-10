@@ -3,12 +3,14 @@
 // or parse an error body themselves.
 
 import type {
+  ActionFieldValues,
   AgentPlanResponse,
   ApprovePlanResponse,
   CancelPlanResponse,
   ExecutePlanResponse,
   RejectPlanResponse,
   StoredPlan,
+  UpdatePlanFieldsResponse,
   ValidationErrorDetail,
 } from "../types/plan";
 
@@ -94,4 +96,14 @@ export function cancelPlan(planId: string): Promise<CancelPlanResponse> {
 
 export function executePlan(planId: string): Promise<ExecutePlanResponse> {
   return request<ExecutePlanResponse>(`/plans/${planId}/execute`, { method: "POST" });
+}
+
+export function updatePlanFields(
+  planId: string,
+  actions: ActionFieldValues[],
+): Promise<UpdatePlanFieldsResponse> {
+  return request<UpdatePlanFieldsResponse>(`/plans/${planId}/fields`, {
+    method: "POST",
+    body: JSON.stringify({ actions }),
+  });
 }
