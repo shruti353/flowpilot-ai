@@ -283,8 +283,8 @@ def test_infer_titles_short_circuits_on_prior_error():
     assert "title" not in action["parameters"]
 
 
-def _calendar_state(user_text: str, raw_datetime: str, *, extra_parameters: dict | None = None):
-    state = initial_state("req-1", user_text)
+def test_enrich_datetime_resolves_tomorrow_at_3pm():
+    state = initial_state("req-1", "Schedule a meeting with the AI team for tomorrow at 3 PM")
     state["raw_plan"] = {
         "intent": "productivity_workflow",
         "summary": "Create a meeting.",
@@ -293,37 +293,60 @@ def _calendar_state(user_text: str, raw_datetime: str, *, extra_parameters: dict
                 "action_id": "action_1",
                 "tool": "calendar",
                 "operation": "create_event",
-                "parameters": {"datetime": raw_datetime, **(extra_parameters or {})},
+                "parameters": {},
                 "missing_information": [],
             }
         ],
     }
-    return state
-
-
-def test_enrich_datetime_resolves_tomorrow_at_3pm():
-    state = _calendar_state("Schedule a meeting with the AI team for tomorrow at 3 PM", "tomorrow at 3 PM")
 
     result = enrich_datetime(state)
     action = result["raw_plan"]["actions"][0]
 
-    expected = normalize_datetime("tomorrow at 3 PM", TZ)
-    assert action["parameters"]["datetime"] == "tomorrow at 3 PM"
+    expected = normalize_datetime("tomorrow 3 PM", TZ)
+    assert action["parameters"]["date"] == "tomorrow"
+    assert action["parameters"]["time"] == "3 PM"
     assert action["parameters"]["resolved_datetime"] == expected.isoformat()
+    assert action["missing_information"] == []
 
 
 def test_enrich_datetime_resolves_today_at_5pm():
-    state = _calendar_state("Schedule a meeting today at 5 PM", "today at 5 PM")
+    state = initial_state("req-1", "Schedule a meeting today at 5 PM")
+    state["raw_plan"] = {
+        "intent": "productivity_workflow",
+        "summary": "Create a meeting.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {},
+                "missing_information": [],
+            }
+        ],
+    }
 
     result = enrich_datetime(state)
     action = result["raw_plan"]["actions"][0]
 
-    expected = normalize_datetime("today at 5 PM", TZ)
+    expected = normalize_datetime("today 5 PM", TZ)
     assert action["parameters"]["resolved_datetime"] == expected.isoformat()
 
 
 def test_enrich_datetime_resolves_a_specific_date_and_time():
-    state = _calendar_state("Schedule a meeting on March 10, 2027 at 9 AM", "March 10, 2027 at 9 AM")
+    state = initial_state("req-1", "Schedule a meeting on March 10, 2027 at 9 AM")
+    state["raw_plan"] = {
+        "intent": "productivity_workflow",
+        "summary": "Create a meeting.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {},
+                "missing_information": [],
+            }
+        ],
+    }
 
     result = enrich_datetime(state)
     action = result["raw_plan"]["actions"][0]
@@ -333,7 +356,20 @@ def test_enrich_datetime_resolves_a_specific_date_and_time():
 
 
 def test_enrich_datetime_uses_correct_timezone_offset():
-    state = _calendar_state("Schedule a meeting tomorrow at 3 PM", "tomorrow at 3 PM")
+    state = initial_state("req-1", "Schedule a meeting tomorrow at 3 PM")
+    state["raw_plan"] = {
+        "intent": "productivity_workflow",
+        "summary": "Create a meeting.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {},
+                "missing_information": [],
+            }
+        ],
+    }
 
     result = enrich_datetime(state)
     action = result["raw_plan"]["actions"][0]
@@ -342,31 +378,21 @@ def test_enrich_datetime_uses_correct_timezone_offset():
     assert action["parameters"]["resolved_datetime"].endswith("+05:30")
 
 
-def test_enrich_datetime_does_not_recompute_existing_resolved_datetime():
-    state = _calendar_state(
-        "Schedule a meeting tomorrow at 3 PM",
-        "tomorrow at 3 PM",
-        extra_parameters={"resolved_datetime": "2099-01-01T00:00:00+05:30"},
-    )
-
-    result = enrich_datetime(state)
-    action = result["raw_plan"]["actions"][0]
-
-    assert action["parameters"]["resolved_datetime"] == "2099-01-01T00:00:00+05:30"
-
-
-def test_enrich_datetime_does_not_invent_datetime_when_missing():
-    state = initial_state("req-1", "Schedule a meeting")
+def test_enrich_datetime_does_not_invent_date_or_time_when_neither_mentioned():
+    # Regression for the reported bug: a bare request with no date/time
+    # reference at all must never resolve a fabricated "tomorrow" - both
+    # must come back as missing, never silently defaulted.
+    state = initial_state("req-1", "Schedule a meeting with the AI team.")
     state["raw_plan"] = {
         "intent": "productivity_workflow",
-        "summary": "Create a meeting; the time was not provided.",
+        "summary": "Create a meeting.",
         "actions": [
             {
                 "action_id": "action_1",
                 "tool": "calendar",
                 "operation": "create_event",
-                "parameters": {"title": "Team Sync"},
-                "missing_information": ["datetime"],
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
             }
         ],
     }
@@ -374,8 +400,65 @@ def test_enrich_datetime_does_not_invent_datetime_when_missing():
     result = enrich_datetime(state)
     action = result["raw_plan"]["actions"][0]
 
+    assert "date" not in action["parameters"]
+    assert "time" not in action["parameters"]
+    assert "datetime" not in action["parameters"]
     assert "resolved_datetime" not in action["parameters"]
-    assert action["missing_information"] == ["datetime"]
+    assert set(action["missing_information"]) == {"date", "time"}
+
+
+def test_enrich_datetime_time_only_leaves_date_missing():
+    state = initial_state("req-1", "Schedule a meeting with the AI team at 3 PM.")
+    state["raw_plan"] = {
+        "intent": "productivity_workflow",
+        "summary": "Create a meeting.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
+            }
+        ],
+    }
+
+    result = enrich_datetime(state)
+    action = result["raw_plan"]["actions"][0]
+
+    assert action["parameters"]["time"] == "3 PM"
+    assert "date" not in action["parameters"]
+    assert "resolved_datetime" not in action["parameters"]
+    assert "resolved_date" not in action["parameters"]
+    assert action["parameters"]["resolved_time"].startswith("15:00")
+    assert action["missing_information"] == ["date"]
+
+
+def test_enrich_datetime_date_only_leaves_time_missing():
+    state = initial_state("req-1", "Schedule a meeting with the AI team tomorrow.")
+    state["raw_plan"] = {
+        "intent": "productivity_workflow",
+        "summary": "Create a meeting.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
+            }
+        ],
+    }
+
+    result = enrich_datetime(state)
+    action = result["raw_plan"]["actions"][0]
+
+    assert action["parameters"]["date"] == "tomorrow"
+    assert "time" not in action["parameters"]
+    assert "resolved_datetime" not in action["parameters"]
+    assert "resolved_time" not in action["parameters"]
+    assert "resolved_date" in action["parameters"]
+    assert action["missing_information"] == ["time"]
 
 
 def test_enrich_datetime_ignores_non_calendar_actions():
@@ -401,13 +484,27 @@ def test_enrich_datetime_ignores_non_calendar_actions():
 
 
 def test_enrich_datetime_short_circuits_on_prior_error():
-    state = _calendar_state("Schedule a meeting tomorrow at 3 PM", "tomorrow at 3 PM")
+    state = initial_state("req-1", "Schedule a meeting tomorrow at 3 PM")
     state["errors"].append("boom")
+    state["raw_plan"] = {
+        "intent": "productivity_workflow",
+        "summary": "Create a meeting.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {},
+                "missing_information": [],
+            }
+        ],
+    }
 
     result = enrich_datetime(state)
     action = result["raw_plan"]["actions"][0]
 
     assert "resolved_datetime" not in action["parameters"]
+    assert "date" not in action["parameters"]
 
 
 def test_infer_titles_then_enrich_datetime_together():
@@ -422,7 +519,7 @@ def test_infer_titles_then_enrich_datetime_together():
                 "action_id": "action_1",
                 "tool": "calendar",
                 "operation": "create_event",
-                "parameters": {"datetime": "tomorrow at 3 PM"},
+                "parameters": {},
                 "missing_information": ["title"],
             }
         ],
@@ -433,11 +530,11 @@ def test_infer_titles_then_enrich_datetime_together():
     result = validate_plan(state)
     action = result["execution_plan"].actions[0]
 
-    expected_resolved = normalize_datetime("tomorrow at 3 PM", TZ).isoformat()
+    expected_resolved = normalize_datetime("tomorrow 3 PM", TZ).isoformat()
     assert result["execution_plan"].status.value == "ready"
     assert action.parameters["title"] == "AI Team Meeting"
-    assert action.parameters["datetime"] == "tomorrow at 3 PM"
     assert action.parameters["resolved_datetime"] == expected_resolved
+    assert action.missing_information == []
 
 
 def test_filter_optional_fields_removes_location_for_calendar_create_event():
@@ -546,7 +643,7 @@ def test_full_deterministic_chain_reaches_ready_despite_missing_location():
                 "action_id": "action_1",
                 "tool": "calendar",
                 "operation": "create_event",
-                "parameters": {"datetime": "tomorrow at 3 PM"},
+                "parameters": {},
                 "missing_information": ["title", "location"],
             }
         ],
@@ -558,7 +655,7 @@ def test_full_deterministic_chain_reaches_ready_despite_missing_location():
     result = validate_plan(state)
     action = result["execution_plan"].actions[0]
 
-    expected_resolved = normalize_datetime("tomorrow at 3 PM", TZ).isoformat()
+    expected_resolved = normalize_datetime("tomorrow 3 PM", TZ).isoformat()
     assert result["execution_plan"].status.value == "ready"
     assert action.missing_information == []
     assert action.parameters["title"] == "AI Team Meeting"
