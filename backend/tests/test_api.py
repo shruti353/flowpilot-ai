@@ -109,7 +109,7 @@ def test_plan_endpoint_flags_missing_critical_information():
                 "action_id": "action_1",
                 "tool": "calendar",
                 "operation": "create_event",
-                "parameters": {"datetime": "tomorrow"},
+                "parameters": {},
                 "missing_information": ["title"],
             }
         ],
@@ -122,7 +122,10 @@ def test_plan_endpoint_flags_missing_critical_information():
     body = response.json()
     assert body["status"] == "needs_clarification"
     assert body["execution_plan"]["status"] == "needs_clarification"
-    assert body["execution_plan"]["actions"][0]["missing_information"] == ["title"]
+    # "title" was genuinely missing (per the LLM); "time" is added
+    # deterministically since the text only ever said "tomorrow" - a date,
+    # not a time.
+    assert body["execution_plan"]["actions"][0]["missing_information"] == ["title", "time"]
     assert body["plan_id"]
 
 
@@ -141,7 +144,7 @@ def test_plan_endpoint_infers_title_when_llm_omits_it():
                 "action_id": "action_1",
                 "tool": "calendar",
                 "operation": "create_event",
-                "parameters": {"datetime": "tomorrow at 3 PM"},
+                "parameters": {},
                 "missing_information": ["title"],
             }
         ],
@@ -159,7 +162,8 @@ def test_plan_endpoint_infers_title_when_llm_omits_it():
     assert body["execution_plan"]["status"] == "ready"
     action = body["execution_plan"]["actions"][0]
     assert action["parameters"]["title"] == "AI Team Meeting"
-    assert action["parameters"]["datetime"] == "tomorrow at 3 PM"
+    assert action["parameters"]["date"] == "tomorrow"
+    assert action["parameters"]["time"] == "3 PM"
     assert action["missing_information"] == []
 
 
@@ -176,7 +180,7 @@ def test_plan_endpoint_resolves_relative_datetime_alongside_inferred_title():
                 "action_id": "action_1",
                 "tool": "calendar",
                 "operation": "create_event",
-                "parameters": {"datetime": "tomorrow at 3 PM"},
+                "parameters": {},
                 "missing_information": ["title"],
             }
         ],
@@ -194,10 +198,9 @@ def test_plan_endpoint_resolves_relative_datetime_alongside_inferred_title():
     assert body["execution_plan"]["status"] == "ready"
     action = body["execution_plan"]["actions"][0]
     assert action["parameters"]["title"] == "AI Team Meeting"
-    assert action["parameters"]["datetime"] == "tomorrow at 3 PM"
 
     expected_resolved = normalize_datetime(
-        "tomorrow at 3 PM", get_settings().flowpilot_timezone
+        "tomorrow 3 PM", get_settings().flowpilot_timezone
     ).isoformat()
     assert action["parameters"]["resolved_datetime"] == expected_resolved
     assert action["parameters"]["resolved_datetime"].endswith("+05:30")
@@ -217,7 +220,7 @@ def test_plan_endpoint_does_not_block_on_missing_optional_location():
                 "action_id": "action_1",
                 "tool": "calendar",
                 "operation": "create_event",
-                "parameters": {"datetime": "tomorrow at 3 PM"},
+                "parameters": {},
                 "missing_information": ["title", "location"],
             }
         ],
@@ -238,7 +241,7 @@ def test_plan_endpoint_does_not_block_on_missing_optional_location():
     assert action["parameters"]["title"] == "AI Team Meeting"
 
     expected_resolved = normalize_datetime(
-        "tomorrow at 3 PM", get_settings().flowpilot_timezone
+        "tomorrow 3 PM", get_settings().flowpilot_timezone
     ).isoformat()
     assert action["parameters"]["resolved_datetime"] == expected_resolved
     assert "location" not in action["parameters"]
@@ -253,7 +256,7 @@ def test_plan_endpoint_still_needs_clarification_when_title_genuinely_missing():
                 "action_id": "action_1",
                 "tool": "calendar",
                 "operation": "create_event",
-                "parameters": {"datetime": "tomorrow"},
+                "parameters": {},
                 "missing_information": ["title", "location"],
             }
         ],
@@ -266,8 +269,10 @@ def test_plan_endpoint_still_needs_clarification_when_title_genuinely_missing():
     body = response.json()
     assert body["status"] == "needs_clarification"
     assert body["execution_plan"]["status"] == "needs_clarification"
-    # "location" was dropped as optional; "title" remains genuinely missing.
-    assert body["execution_plan"]["actions"][0]["missing_information"] == ["title"]
+    # "location" was dropped as optional; "title" remains genuinely missing;
+    # "time" is added deterministically since only a date ("tomorrow") was
+    # ever mentioned.
+    assert body["execution_plan"]["actions"][0]["missing_information"] == ["title", "time"]
 
 
 def test_plan_endpoint_returns_502_when_llm_unreachable():
