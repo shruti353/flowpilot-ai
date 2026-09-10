@@ -7,22 +7,54 @@ const TITLES: Partial<Record<StoredPlanStatus, string>> = {
   execution_failed: "STATUS: EXECUTION FAILED",
 };
 
+// Generic fallback for tools/operations without an adapter-specific result
+// shape (calendar's is rendered specially below). Mirrors ActionCard's
+// generic param list.
+function GenericResultDetails({ result }: { result: Record<string, unknown> }) {
+  const entries = Object.entries(result).filter(([, value]) => value !== null && value !== undefined);
+  if (entries.length === 0) return null;
+
+  return (
+    <dl className="execution-result__generic">
+      {entries.map(([key, value]) => (
+        <div className="execution-result__generic-row" key={key}>
+          <dt>{key.replace(/_/g, " ")}</dt>
+          <dd>{String(value)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 function ActionLine({ action }: { action: ActionExecutionResult }) {
   const label = `${action.tool}.${action.operation}`;
+  const attemptNote = action.attempt_count > 1 ? ` (attempt ${action.attempt_count})` : "";
 
   if (action.status === "succeeded") {
     const eventId = action.result?.external_event_id;
     const link = action.result?.html_link;
     const startDatetime = action.result?.start_datetime;
+    const isCalendarShape =
+      typeof eventId === "string" || typeof link === "string" || typeof startDatetime === "string";
+
     return (
       <li className="execution-result__action execution-result__action--ok">
-        <p>✓ Calendar event created successfully</p>
-        {typeof startDatetime === "string" && <p className="execution-result__detail">Scheduled: {startDatetime}</p>}
-        {typeof eventId === "string" && <p className="execution-result__detail">Event ID: {eventId}</p>}
-        {typeof link === "string" && (
-          <a href={link} target="_blank" rel="noreferrer">
-            Open Calendar
-          </a>
+        <p>
+          {isCalendarShape ? "✓ Calendar event created successfully" : `✓ ${label} completed successfully`}
+          {attemptNote}
+        </p>
+        {isCalendarShape ? (
+          <>
+            {typeof startDatetime === "string" && <p className="execution-result__detail">Scheduled: {startDatetime}</p>}
+            {typeof eventId === "string" && <p className="execution-result__detail">Event ID: {eventId}</p>}
+            {typeof link === "string" && (
+              <a href={link} target="_blank" rel="noreferrer">
+                Open Calendar
+              </a>
+            )}
+          </>
+        ) : (
+          action.result && <GenericResultDetails result={action.result} />
         )}
       </li>
     );
@@ -38,7 +70,15 @@ function ActionLine({ action }: { action: ActionExecutionResult }) {
 
   return (
     <li className="execution-result__action execution-result__action--error">
-      ✗ {label} failed{action.error ? `: ${action.error.message}` : ""}
+      <p>
+        ✗ {label} failed{attemptNote}
+        {action.error ? `: ${action.error.message}` : ""}
+      </p>
+      {action.error && (
+        <p className="execution-result__detail">
+          Error code: {action.error.code} ({action.error.stage})
+        </p>
+      )}
     </li>
   );
 }
