@@ -10,6 +10,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.models.field_schema import resolve_field_meta
+from app.models.missing_field import MissingFieldSpec
+
 
 class ToolName(str, Enum):
     calendar = "calendar"
@@ -53,6 +56,13 @@ class Action(BaseModel):
             "user's request. Populated instead of inventing a value."
         ),
     )
+    missing_fields: list[MissingFieldSpec] = Field(
+        default_factory=list,
+        description=(
+            "Typed, renderable form of missing_information - derived deterministically "
+            "from (tool, operation, field name), never set directly by the LLM."
+        ),
+    )
     requires_approval: bool = Field(
         default=True,
         description="Week 1 never executes actions; this is always expected to be true.",
@@ -67,4 +77,22 @@ class Action(BaseModel):
                 f"operation '{self.operation.value}' is not supported for tool "
                 f"'{self.tool.value}'. Supported operations for this tool: {supported}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def derive_missing_fields(self) -> "Action":
+        fields = []
+        for name in self.missing_information:
+            label, field_type, options = resolve_field_meta(
+                self.tool.value, self.operation.value, name
+            )
+            fields.append(
+                MissingFieldSpec(
+                    field=name,
+                    label=label,
+                    type=field_type,
+                    options=list(options) if options else None,
+                )
+            )
+        self.missing_fields = fields
         return self
