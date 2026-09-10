@@ -31,17 +31,17 @@ OPTIONAL_MISSING_FIELDS: dict[tuple[str, str], frozenset[str]] = {
 }
 
 
-def filter_optional_fields(state: AgentState) -> AgentState:
-    if state.get("errors"):
-        return state
+def apply_filter_optional_fields(raw_plan: dict) -> dict:
+    """Pure transform: drops genuinely-optional field names from
+    missing_information in place.
 
-    raw_plan = state.get("raw_plan")
-    if not isinstance(raw_plan, dict):
-        return state
-
+    Extracted so both the LangGraph node below and the deterministic
+    plan-update pipeline (used by POST /plans/{plan_id}/fields) can re-run
+    exactly this logic without duplicating it.
+    """
     actions = raw_plan.get("actions")
     if not isinstance(actions, list):
-        return state
+        return raw_plan
 
     for action in actions:
         if not isinstance(action, dict):
@@ -57,4 +57,16 @@ def filter_optional_fields(state: AgentState) -> AgentState:
 
         action["missing_information"] = [field for field in missing if field not in optional_fields]
 
+    return raw_plan
+
+
+def filter_optional_fields(state: AgentState) -> AgentState:
+    if state.get("errors"):
+        return state
+
+    raw_plan = state.get("raw_plan")
+    if not isinstance(raw_plan, dict):
+        return state
+
+    apply_filter_optional_fields(raw_plan)
     return state
