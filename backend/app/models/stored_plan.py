@@ -8,6 +8,7 @@ StoredPlan is lost when the process restarts.
 
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -44,8 +45,13 @@ class StoredPlanStatus(str, Enum):
 #: The only status a plan may be approved/rejected/cancelled from.
 PENDING_STATUS = StoredPlanStatus.awaiting_approval
 
-#: Statuses a plan can never execute from - approval was never granted,
-#: or the decision/outcome already happened.
+#: Statuses a plan can never execute from - approval was never granted, the
+#: decision was final (rejected/cancelled), or every action already
+#: succeeded (executed - nothing left to retry). Week 4: partially_executed
+#: and execution_failed are deliberately NOT in this set - a plan that
+#: didn't fully succeed may be retried via the same /execute endpoint,
+#: which only re-attempts actions that didn't already succeed (see
+#: app/services/execution_service.py).
 NON_EXECUTABLE_STATUSES = frozenset(
     {
         StoredPlanStatus.awaiting_approval,
@@ -55,8 +61,6 @@ NON_EXECUTABLE_STATUSES = frozenset(
         StoredPlanStatus.error,
         StoredPlanStatus.executing,
         StoredPlanStatus.executed,
-        StoredPlanStatus.partially_executed,
-        StoredPlanStatus.execution_failed,
     }
 )
 
@@ -93,6 +97,24 @@ class AgentPlanResponse(BaseModel):
 
 class RejectPlanRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=2000)
+
+
+class ActionFieldValues(BaseModel):
+    """User-supplied values for one action's currently-missing fields."""
+
+    action_id: str = Field(..., min_length=1)
+    values: dict[str, Any] = Field(..., min_length=1)
+
+
+class UpdatePlanFieldsRequest(BaseModel):
+    actions: list[ActionFieldValues] = Field(..., min_length=1)
+
+
+class UpdatePlanFieldsResponse(BaseModel):
+    plan_id: str
+    status: StoredPlanStatus
+    message: str
+    plan: StoredPlan
 
 
 class ApprovePlanResponse(BaseModel):
