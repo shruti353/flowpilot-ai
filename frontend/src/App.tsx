@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { ApiError, approvePlan, executePlan, generatePlan, rejectPlan } from "./services/api";
-import type { StoredPlan } from "./types/plan";
+import { ApiError, approvePlan, executePlan, generatePlan, rejectPlan, updatePlanFields } from "./services/api";
+import type { ActionFieldValues, StoredPlan } from "./types/plan";
 import { RequestInput } from "./components/RequestInput";
 import { PlanPreview } from "./components/PlanPreview";
 import { ApprovalControls } from "./components/ApprovalControls";
@@ -10,6 +10,7 @@ function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDeciding, setIsDeciding] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [isUpdatingFields, setIsUpdatingFields] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleGenerate = async (text: string) => {
@@ -78,6 +79,20 @@ function App() {
     }
   };
 
+  const handleUpdateFields = async (actions: ActionFieldValues[]) => {
+    if (!plan) return;
+    setIsUpdatingFields(true);
+    setError(null);
+    try {
+      const response = await updatePlanFields(plan.plan_id, actions);
+      setPlan(response.plan);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not update the plan.");
+    } finally {
+      setIsUpdatingFields(false);
+    }
+  };
+
   return (
     <main className="app">
       <header className="app__header">
@@ -109,8 +124,10 @@ function App() {
             onApprove={handleApprove}
             onReject={handleReject}
             onExecute={handleExecute}
+            onUpdateFields={handleUpdateFields}
             isSubmitting={isDeciding}
             isExecuting={isExecuting}
+            isUpdatingFields={isUpdatingFields}
           />
         </>
       )}
