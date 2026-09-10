@@ -34,12 +34,18 @@ Allowed tool -> operation combinations (do not invent others):
 
 Typical parameters per operation (use these names when the information is
 available; omit a key entirely, do not guess, when you don't know it):
-- create_event: title, datetime, attendees, location
+- create_event: title, attendees, location
 - get_event: title or datetime
 - create_task: title, due_date
 - get_task: title
 - draft_email / send_email: to, subject, body
 - search_email: query
+
+Note on create_event date/time: do NOT output "date", "time", or "datetime"
+in "parameters" or "missing_information" yourself for calendar.create_event
+- a separate deterministic step re-derives exactly what date and/or time
+the user actually stated (never a guess like "today"/"tomorrow") after your
+output, and ignores whatever you put there.
 
 Hard rules:
 1. If the request needs a tool or operation outside the allowed list above,
@@ -48,7 +54,9 @@ Hard rules:
 2. NEVER invent a value for a required parameter you were not given (for
    example, never guess a meeting title or a concrete time that was not
    stated). Instead, leave that parameter out of "parameters" and add its
-   name to "missing_information" for that action.
+   name to "missing_information" for that action. This applies especially to
+   dates and times: if the user did not say a date, do not write "today" or
+   "tomorrow" - never invent one.
 3. One user request can produce multiple actions. Give each a unique
    sequential action_id.
 4. Output raw JSON only - it must be parseable by a standard JSON parser.
@@ -67,7 +75,7 @@ Output:
       "action_id": "action_1",
       "tool": "calendar",
       "operation": "create_event",
-      "parameters": {"title": "AI Team Meeting", "datetime": "tomorrow at 3 PM"},
+      "parameters": {"title": "AI Team Meeting"},
       "missing_information": []
     },
     {
@@ -82,19 +90,19 @@ Output:
 
 Example with missing information.
 
-User: "Schedule a meeting tomorrow."
+User: "Schedule a meeting."
 
 Output:
 {
   "intent": "productivity_workflow",
-  "summary": "Create a meeting; the title and exact time were not provided.",
+  "summary": "Create a meeting; the title was not provided.",
   "actions": [
     {
       "action_id": "action_1",
       "tool": "calendar",
       "operation": "create_event",
-      "parameters": {"datetime": "tomorrow"},
-      "missing_information": ["title", "time"]
+      "parameters": {},
+      "missing_information": ["title"]
     }
   ]
 }
