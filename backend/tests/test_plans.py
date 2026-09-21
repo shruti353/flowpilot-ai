@@ -709,3 +709,323 @@ def test_saving_a_team_then_filling_email_fields_reaches_awaiting_approval():
     approve = client.post(f"/api/v1/plans/{plan_id}/approve")
     assert approve.status_code == 200
     assert approve.json()["status"] == "approved"
+
+
+# --- Week 5 Day 3: multi-action validation, action isolation, mixed -----
+# valid/invalid actions. Builds on the Week 5 Day 1/2 foundation above
+# (multi-action plans, deterministic recipient resolution, the
+# missing_fields/fields-update pipeline) - no new architecture, just
+# additional coverage proving the existing pipeline already satisfies the
+# Day 3 requirements: independent per-action validation, no silently
+# dropped actions, and action_id-scoped field updates that never bleed
+# into a sibling action.
+
+# Calendar action is fully specified (title, date, time all resolve from
+# MULTI_ACTION_TEXT); email action is already fully specified too (a
+# direct, literal email address needs no saved contact/team) - so this
+# plan reaches "awaiting_approval" the moment it's generated, with BOTH
+# actions valid. Used for scenario C ("both actions valid").
+BOTH_VALID_RAW_PLAN = {
+    "intent": "productivity_workflow",
+    "summary": "Schedule a meeting and email a colleague about it.",
+    "actions": [
+        {
+            "action_id": "action_1",
+            "tool": "calendar",
+            "operation": "create_event",
+            "parameters": {"title": "AI Team Meeting"},
+            "missing_information": [],
+        },
+        {
+            "action_id": "action_2",
+            "tool": "email",
+            "operation": "send_email",
+            "parameters": {
+                "to": "someone@example.com",
+                "subject": "Project update",
+                "body": "Here is the latest status.",
+            },
+            "missing_information": [],
+        },
+    ],
+}
+
+# Calendar action is missing date/time (MULTI_ACTION_TEXT is not used here
+# - no date/time phrase); email action is fully specified via a direct
+# email address. Used for scenario B ("email valid + calendar missing
+# datetime") and for the calendar-update isolation test.
+CALENDAR_MISSING_EMAIL_VALID_RAW_PLAN = {
+    "intent": "productivity_workflow",
+    "summary": "Schedule a meeting and email a colleague about it.",
+    "actions": [
+        {
+            "action_id": "action_1",
+            "tool": "calendar",
+            "operation": "create_event",
+            "parameters": {"title": "AI Team Meeting"},
+            "missing_information": [],
+        },
+        {
+            "action_id": "action_2",
+            "tool": "email",
+            "operation": "send_email",
+            "parameters": {
+                "to": "someone@example.com",
+                "subject": "Project update",
+                "body": "Here is the latest status.",
+            },
+            "missing_information": [],
+        },
+    ],
+}
+CALENDAR_MISSING_EMAIL_VALID_TEXT = "Schedule a meeting with the AI team and email someone@example.com about the project."
+
+
+def test_both_actions_valid_reaches_awaiting_approval_and_is_not_auto_approved():
+    # Scenario C: both actions valid on generation. The plan must land in
+    # awaiting_approval - never "approved" - until a human explicitly hits
+    # POST /approve.
+    created = _create_plan(BOTH_VALID_RAW_PLAN, text=MULTI_ACTION_TEXT)
+
+    assert created["status"] == "awaiting_approval"
+    assert created["execution_plan"]["status"] == "ready"
+    actions = created["execution_plan"]["actions"]
+    assert len(actions) == 2
+    assert all(a["missing_information"] == [] for a in actions)
+
+    # Re-fetching must show the same not-yet-approved status - generation
+    # itself never approves anything.
+    refetched = client.get(f"/api/v1/plans/{created['plan_id']}").json()
+    assert refetched["status"] == "awaiting_approval"
+
+    approve = client.post(f"/api/v1/plans/{created['plan_id']}/approve")
+    assert approve.status_code == 200
+    assert approve.json()["status"] == "approved"
+
+
+def test_calendar_missing_datetime_with_valid_email_preserves_both_actions():
+    # Scenario B: email action is valid, calendar action is missing
+    # date/time. Both actions must survive, only the calendar action may
+    # be reported as missing information, and the plan overall requires
+    # clarification (never silently dropping the email action).
+    created = _create_plan(
+        CALENDAR_MISSING_EMAIL_VALID_RAW_PLAN, text=CALENDAR_MISSING_EMAIL_VALID_TEXT
+    )
+
+    assert created["status"] == "needs_clarification"
+    actions = created["execution_plan"]["actions"]
+    assert len(actions) == 2
+
+    calendar_action, email_action = actions
+    assert set(calendar_action["missing_information"]) == {"date", "time"}
+    assert email_action["missing_information"] == []
+    assert email_action["parameters"]["resolved_recipients"][0]["email"] == "someone@example.com"
+
+    # A plan with any action missing required information cannot be approved.
+    response = client.post(f"/api/v1/plans/{created['plan_id']}/approve")
+    assert response.status_code == 409
+
+
+def test_updating_only_the_email_action_leaves_the_calendar_action_untouched():
+    # Action isolation, direction 1: submitting fields scoped to the email
+    # action_id must not mutate the calendar action's parameters,
+    # missing_information, or missing_fields in any way.
+    created = _create_plan(MULTI_ACTION_CALENDAR_EMAIL_RAW_PLAN, text=MULTI_ACTION_TEXT)
+    plan_id = created["plan_id"]
+    calendar_action_before = created["execution_plan"]["actions"][0]
+    assert calendar_action_before["tool"] == "calendar"
+    assert calendar_action_before["missing_information"] == []
+
+    response = client.post(
+        f"/api/v1/plans/{plan_id}/fields",
+        json={
+            "actions": [
+                {
+                    "action_id": "action_2",
+                    "values": {
+                        "to": "someone@example.com",
+                        "subject": "Project update",
+                        "body": "Here is the latest status.",
+                    },
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    plan = response.json()["plan"]
+    calendar_action_after = plan["execution_plan"]["actions"][0]
+    assert calendar_action_after == calendar_action_before
+
+    email_action_after = plan["execution_plan"]["actions"][1]
+    assert email_action_after["missing_information"] == []
+    assert email_action_after["parameters"]["resolved_recipients"][0]["email"] == "someone@example.com"
+
+
+def test_updating_only_the_calendar_action_leaves_the_email_action_untouched():
+    # Action isolation, direction 2: submitting fields scoped to the
+    # calendar action_id must not mutate the already-valid email action.
+    created = _create_plan(
+        CALENDAR_MISSING_EMAIL_VALID_RAW_PLAN, text=CALENDAR_MISSING_EMAIL_VALID_TEXT
+    )
+    plan_id = created["plan_id"]
+    email_action_before = created["execution_plan"]["actions"][1]
+    assert email_action_before["tool"] == "email"
+    assert email_action_before["missing_information"] == []
+
+    response = client.post(
+        f"/api/v1/plans/{plan_id}/fields",
+        json={
+            "actions": [
+                {"action_id": "action_1", "values": {"date": "2026-09-10", "time": "15:00"}}
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    plan = response.json()["plan"]
+    email_action_after = plan["execution_plan"]["actions"][1]
+    assert email_action_after == email_action_before
+
+    calendar_action_after = plan["execution_plan"]["actions"][0]
+    assert calendar_action_after["missing_information"] == []
+    assert calendar_action_after["parameters"]["resolved_datetime"].startswith("2026-09-10T15:00")
+
+    approve = client.post(f"/api/v1/plans/{plan_id}/approve")
+    assert approve.status_code == 200
+
+
+def test_known_multi_member_team_resolves_at_initial_plan_generation():
+    # Scenario E, exercised end-to-end (not just at the resolution-service
+    # unit level): when the team already exists with members BEFORE the
+    # plan is ever generated, the email action needs no /fields round trip
+    # at all - RESOLVE_RECIPIENTS resolves it deterministically during
+    # GENERATE_PLAN itself.
+    team = client.post("/api/v1/teams", json={"name": "AI Team"}).json()
+    for name, email in [("Adarsh", "adarsh@example.com"), ("Rahul", "rahul@example.com")]:
+        client.post(f"/api/v1/teams/{team['id']}/members", json={"name": name, "email": email})
+
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "Schedule a meeting and email the AI team.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
+            },
+            {
+                "action_id": "action_2",
+                "tool": "email",
+                "operation": "send_email",
+                "parameters": {
+                    "to": "AI Team",
+                    "subject": "Project update",
+                    "body": "Here is the latest status.",
+                },
+                "missing_information": [],
+            },
+        ],
+    }
+
+    created = _create_plan(raw_plan, text=MULTI_ACTION_TEXT)
+
+    assert created["status"] == "awaiting_approval"
+    email_action = created["execution_plan"]["actions"][1]
+    assert email_action["missing_information"] == []
+    resolved_emails = {r["email"] for r in email_action["parameters"]["resolved_recipients"]}
+    assert resolved_emails == {"adarsh@example.com", "rahul@example.com"}
+
+    approve = client.post(f"/api/v1/plans/{created['plan_id']}/approve")
+    assert approve.status_code == 200
+    assert approve.json()["status"] == "approved"
+
+
+def test_ambiguous_contact_name_is_unresolved_until_disambiguated_via_fields():
+    # Scenario F, end-to-end: two saved contacts share the name "Rahul".
+    # The planner must never guess between them - the email action stays
+    # missing "to" with a hint explaining the ambiguity, and only a more
+    # specific reference (here, a direct email address) resolves it.
+    client.post("/api/v1/contacts", json={"name": "Rahul", "email": "rahul.one@example.com"})
+    client.post("/api/v1/contacts", json={"name": "Rahul", "email": "rahul.two@example.com"})
+
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "Schedule a meeting and email Rahul.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
+            },
+            {
+                "action_id": "action_2",
+                "tool": "email",
+                "operation": "send_email",
+                "parameters": {"to": "Rahul", "subject": "Project update", "body": "Status update."},
+                "missing_information": [],
+            },
+        ],
+    }
+    created = _create_plan(raw_plan, text=MULTI_ACTION_TEXT)
+
+    assert created["status"] == "needs_clarification"
+    calendar_action, email_action = created["execution_plan"]["actions"]
+    assert calendar_action["missing_information"] == []
+    assert email_action["missing_information"] == ["to"]
+    assert "Multiple contacts" in email_action["missing_field_hints"]["to"]
+    # No fabricated address anywhere in the preview.
+    assert "resolved_recipients" not in email_action["parameters"]
+
+    response = client.post(
+        f"/api/v1/plans/{created['plan_id']}/fields",
+        json={"actions": [{"action_id": "action_2", "values": {"to": "rahul.two@example.com"}}]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "awaiting_approval"
+    updated_email_action = body["plan"]["execution_plan"]["actions"][1]
+    assert updated_email_action["missing_information"] == []
+    assert updated_email_action["parameters"]["resolved_recipients"][0]["email"] == "rahul.two@example.com"
+
+
+def test_duplicate_action_ids_rejected_through_the_full_agent_plan_api():
+    # Model-level uniqueness (app/models/execution_plan.py) is already unit
+    # tested; this pins the same guarantee end-to-end through POST
+    # /api/v1/agent/plan - a plan is never silently accepted (or silently
+    # de-duplicated) when the LLM emits a repeated action_id.
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "Schedule a meeting and email about it.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
+            },
+            {
+                "action_id": "action_1",  # duplicate on purpose
+                "tool": "email",
+                "operation": "send_email",
+                "parameters": {
+                    "to": "someone@example.com",
+                    "subject": "Project update",
+                    "body": "Here is the latest status.",
+                },
+                "missing_information": [],
+            },
+        ],
+    }
+
+    created = _create_plan(raw_plan, text=MULTI_ACTION_TEXT)
+
+    assert created["status"] == "error"
+    assert created["execution_plan"] is None
+    assert any("unique" in e["message"] for e in created["errors"])

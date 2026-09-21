@@ -432,6 +432,43 @@ def test_needs_clarification_plan_cannot_execute(configured_settings):
     assert response.json()["detail"]["current_status"] == "needs_clarification"
 
 
+def test_multi_action_plan_with_one_incomplete_action_cannot_execute(configured_settings):
+    # Week 5 Day 3: even when one action in a multi-action plan (here, the
+    # calendar action) is fully specified and would execute fine on its
+    # own, the plan as a whole stays "needs_clarification" - and therefore
+    # blocked from /execute entirely - as long as ANY action (here, the
+    # email action) is still missing required information. Partial
+    # execution is never triggered by field-completeness; only an explicit
+    # approve on a fully-specified plan can lead to execution.
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "Schedule a meeting and email the AI team.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
+            },
+            {
+                "action_id": "action_2",
+                "tool": "email",
+                "operation": "send_email",
+                "parameters": {"to": "AI Team"},
+                "missing_information": ["subject", "body"],
+            },
+        ],
+    }
+    created = _create_plan(raw_plan, text=DEFAULT_TEXT)
+    assert created["status"] == "needs_clarification"
+
+    response = client.post(f"/api/v1/plans/{created['plan_id']}/execute")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["current_status"] == "needs_clarification"
+
+
 def test_duplicate_execute_request_does_not_call_n8n_twice(configured_settings):
     fake_client = FakeN8nClient(result={"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"})
     n8n_client.set_n8n_client(fake_client)
