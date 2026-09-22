@@ -124,6 +124,7 @@ interface ActionCardProps {
 }
 
 export function ActionCard({ action, index }: ActionCardProps) {
+  const isReady = action.missing_fields.length === 0;
   const hasResolvedRecipients =
     Array.isArray(action.parameters.resolved_recipients) &&
     action.parameters.resolved_recipients.length > 0;
@@ -154,6 +155,10 @@ export function ActionCard({ action, index }: ActionCardProps) {
       </div>
       <div className="action-card__operation">{OPERATION_LABELS[action.operation]}</div>
 
+      <p className={`action-card__status action-card__status--${isReady ? "ready" : "missing"}`}>
+        {isReady ? "✓ Ready" : "⚠ Missing information"}
+      </p>
+
       {(paramEntries.length > 0 || hasDateTimeInfo || hasResolvedRecipients) && (
         <dl className="action-card__params">
           <DateTimeSummary parameters={action.parameters} />
@@ -167,10 +172,15 @@ export function ActionCard({ action, index }: ActionCardProps) {
         </dl>
       )}
 
-      {action.missing_information.length > 0 && (
-        <p className="action-card__missing">
-          Missing information: {action.missing_information.join(", ")}
-        </p>
+      {!isReady && (
+        <ul className="action-card__missing-list">
+          {action.missing_fields.map((field) => (
+            <li key={field.field}>
+              <span className="action-card__missing-label">{field.label}</span>
+              {field.hint && <span className="action-card__missing-hint"> — {field.hint}</span>}
+            </li>
+          ))}
+        </ul>
       )}
     </li>
   );

@@ -273,10 +273,34 @@ body {
   font-weight: 500;
 }
 
-.action-card__missing {
+.action-card__status {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.action-card__status--ready {
+  color: var(--success);
+}
+
+.action-card__status--missing {
+  color: var(--warning);
+}
+
+.action-card__missing-list {
   margin: 0.15rem 0 0;
+  padding-left: 1.1rem;
   font-size: 0.85rem;
   color: var(--warning);
+}
+
+.action-card__missing-label {
+  font-weight: 600;
+}
+
+.action-card__missing-hint {
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 /* Status badge */
