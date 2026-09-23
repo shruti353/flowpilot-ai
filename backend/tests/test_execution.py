@@ -460,6 +460,9 @@ async def test_email_adapter_fails_without_resolved_recipients(configured_settin
 
     assert result.status == ActionExecutionStatus.failed
     assert result.error.code == "UNRESOLVED_RECIPIENTS"
+    # Week 5 Day 6: a pre-flight check that never reached n8n is a
+    # validation-stage failure, not a "workflow" one.
+    assert result.error.stage == "validation"
     assert fake_client.calls == []
 
 
@@ -537,6 +540,8 @@ async def test_email_n8n_failure_response_marks_action_failed(configured_setting
     assert result.status == ActionExecutionStatus.failed
     assert result.error.code == "SMTP_AUTH_FAILED"
     assert result.error.message == "bad credentials"
+    # Week 5 Day 6: n8n ran and told us it failed - a workflow-stage failure.
+    assert result.error.stage == "workflow"
 
 
 @pytest.mark.asyncio
@@ -549,6 +554,7 @@ async def test_email_n8n_unreachable_marks_action_failed(configured_settings):
 
     assert result.status == ActionExecutionStatus.failed
     assert result.error.code == "N8N_UNREACHABLE"
+    assert result.error.stage == "transport"
 
 
 @pytest.mark.asyncio
@@ -560,6 +566,7 @@ async def test_email_n8n_not_configured_marks_action_failed_without_a_client_cal
 
     assert result.status == ActionExecutionStatus.failed
     assert result.error.code == "N8N_NOT_CONFIGURED"
+    assert result.error.stage == "configuration"
     assert fake_client.calls == []
 
 
@@ -1040,6 +1047,59 @@ def test_calendar_succeeds_and_email_fails_reports_partially_executed(configured
     assert by_action_id["action_1"]["status"] == "succeeded"
     assert by_action_id["action_2"]["status"] == "failed"
     assert by_action_id["action_2"]["error"]["code"] == "SMTP_AUTH_FAILED"
+
+
+def test_calendar_fails_and_email_succeeds_reports_partially_executed(configured_settings):
+    # The reverse of the above - order of actions in a plan never determines
+    # which one succeeds; each is dispatched to its own adapter independently.
+    fake_client = PerUrlFakeN8nClient(
+        responses={
+            CALENDAR_WEBHOOK_URL: {"success": False, "error_code": "CALENDAR_API_ERROR", "message": "quota exceeded"},
+            EMAIL_WEBHOOK_URL: {"success": True, "message_id": "msg_1"},
+        }
+    )
+    n8n_client.set_n8n_client(fake_client)
+    plan_id = _create_and_approve_plan(CALENDAR_AND_SEND_EMAIL_RAW_PLAN, text=CALENDAR_AND_SEND_EMAIL_TEXT)
+
+    response = client.post(f"/api/v1/plans/{plan_id}/execute")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "partially_executed"
+    assert body["execution"]["status"] == "partial"
+
+    by_action_id = {a["action_id"]: a for a in body["execution"]["actions"]}
+    assert by_action_id["action_1"]["status"] == "failed"
+    assert by_action_id["action_1"]["error"]["code"] == "CALENDAR_API_ERROR"
+    assert by_action_id["action_2"]["status"] == "succeeded"
+    assert by_action_id["action_2"]["result"]["message_id"] == "msg_1"
+
+
+def test_calendar_and_email_both_fail_reports_execution_failed(configured_settings):
+    fake_client = PerUrlFakeN8nClient(
+        responses={
+            CALENDAR_WEBHOOK_URL: {"success": False, "error_code": "CALENDAR_API_ERROR", "message": "quota exceeded"},
+            EMAIL_WEBHOOK_URL: {"success": False, "error_code": "SMTP_AUTH_FAILED", "message": "bad credentials"},
+        }
+    )
+    n8n_client.set_n8n_client(fake_client)
+    plan_id = _create_and_approve_plan(CALENDAR_AND_SEND_EMAIL_RAW_PLAN, text=CALENDAR_AND_SEND_EMAIL_TEXT)
+
+    response = client.post(f"/api/v1/plans/{plan_id}/execute")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "execution_failed"
+    assert body["execution"]["status"] == "failed"
+
+    by_action_id = {a["action_id"]: a for a in body["execution"]["actions"]}
+    assert by_action_id["action_1"]["status"] == "failed"
+    assert by_action_id["action_1"]["error"]["code"] == "CALENDAR_API_ERROR"
+    assert by_action_id["action_2"]["status"] == "failed"
+    assert by_action_id["action_2"]["error"]["code"] == "SMTP_AUTH_FAILED"
+    # Both results are preserved independently - a double failure is never
+    # collapsed into one generic error.
+    assert len(body["execution"]["actions"]) == 2
 
 
 def test_retry_after_email_failure_only_recalls_the_email_webhook_not_calendar(configured_settings):

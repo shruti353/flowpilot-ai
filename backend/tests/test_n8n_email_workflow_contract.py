@@ -67,12 +67,57 @@ def test_send_email_node_maps_to_subject_text_from_validated_output():
     assert params["text"] == "={{ $json.text }}"
 
 
-def test_send_email_node_uses_an_smtp_credential_not_a_hardcoded_secret():
+def test_send_email_node_carries_no_credential_reference_or_secret():
+    # No password/API key ever appears inline in the workflow JSON - the SMTP
+    # credential is bound by hand inside n8n's own credential store.
+    #
+    # It also exports with NO credential reference at all: a placeholder
+    # credential id (the previous approach) makes the node look configured
+    # while failing to resolve at run time, which is exactly how a send that
+    # never happened got reported as a success (see the test below).
     node = _node(_load_workflow(), "Send Email")
-    assert "smtp" in node["credentials"]
-    # No password/API key ever appears inline in the workflow JSON - only a
-    # credential reference resolved inside n8n's own credential store.
+    assert "credentials" not in node
     assert "password" not in json.dumps(node).lower()
+
+
+def test_success_response_is_gated_on_proof_that_the_email_was_actually_sent():
+    """Regression guard for a false-success bug.
+
+    The Send Email node errored ("Credential ... does not exist"), passed its
+    INPUT straight through on output 0, and that output was wired directly to
+    "Respond Success" - so the workflow answered {"success": true} for an
+    email that was never sent, and the backend faithfully recorded the action
+    as succeeded.
+
+    The fix: every Send Email output goes through an IF node that requires a
+    real SMTP messageId before "Respond Success" can be reached. Success must
+    be proven, never inferred from which branch an item came out of.
+    """
+    workflow = _load_workflow()
+    connections = workflow["connections"]
+
+    gate = _node(workflow, "Verify Send Result")
+    assert gate["type"] == "n8n-nodes-base.if"
+    condition = gate["parameters"]["conditions"]["conditions"][0]
+    assert "messageId" in condition["leftValue"]
+    assert condition["operator"]["operation"] == "notEmpty"
+
+    # EVERY Send Email output must land on the gate - never on a Respond node
+    # directly - regardless of which output index n8n routes an error to.
+    send_targets = {edge["node"] for branch in connections["Send Email"]["main"] for edge in branch}
+    assert send_targets == {"Verify Send Result"}
+
+    # Only the gate's true branch may answer success; the false branch must
+    # report failure.
+    gate_branches = connections["Verify Send Result"]["main"]
+    assert [edge["node"] for edge in gate_branches[0]] == ["Respond Success"]
+    assert [edge["node"] for edge in gate_branches[1]] == ["Respond Email Failure"]
+
+
+def test_success_response_reports_the_real_message_id():
+    body = _node(_load_workflow(), "Respond Success")["parameters"]["responseBody"]
+    assert "$json.messageId" in body
+    assert "success: true" in body
 
 
 def test_webhook_path_matches_configured_email_webhook_path():
@@ -89,6 +134,8 @@ def test_error_branches_are_wired_to_respond_nodes():
     assert "Send Email" in validate_targets
     assert "Respond Invalid Payload" in validate_targets
 
-    send_targets = {edge["node"] for branch in connections["Send Email"]["main"] for edge in branch}
-    assert "Respond Success" in send_targets
-    assert "Respond Email Failure" in send_targets
+    gate_targets = {
+        edge["node"] for branch in connections["Verify Send Result"]["main"] for edge in branch
+    }
+    assert "Respond Success" in gate_targets
+    assert "Respond Email Failure" in gate_targets
