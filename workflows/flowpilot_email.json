@@ -41,38 +41,66 @@
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
       "onError": "continueErrorOutput",
-      "position": [640, 220],
-      "credentials": {
-        "smtp": {
-          "id": "REPLACE_WITH_YOUR_SMTP_CREDENTIAL_ID",
-          "name": "FlowPilot SMTP account"
-        }
-      }
+      "notes": "Bind your own SMTP credential here (Credential to connect with). No credential is exported with this workflow on purpose - a placeholder credential id makes the node LOOK configured while silently failing to resolve, which previously produced a false success (see 'Verify Send Result').",
+      "position": [640, 220]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "send-proof-message-id",
+              "leftValue": "={{ $json.messageId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "7a2f7f3b-2222-4b4c-9d2b-000000000007",
+      "name": "Verify Send Result",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "notes": "Success is PROVEN, never assumed. Only an item carrying a real SMTP messageId is allowed to reach Respond Success. Both of Send Email's outputs feed in here, so a node error that passes its input straight through (which is what happens when the credential cannot be resolved) can never be reported as a successful send.",
+      "position": [820, 220]
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { success: true, message_id: $json.messageId, message: \"Email sent successfully\" } }}",
+        "responseBody": "={{ { success: true, message_id: $json.messageId, accepted: $json.accepted, message: \"Email sent successfully\" } }}",
         "options": {}
       },
       "id": "7a2f7f3b-2222-4b4c-9d2b-000000000004",
       "name": "Respond Success",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [860, 160]
+      "position": [1040, 140]
     },
     {
       "parameters": {
         "respondWith": "json",
         "responseCode": 200,
-        "responseBody": "={{ { success: false, error_code: \"EMAIL_SEND_ERROR\", message: $json.error?.message || \"Failed to send the email.\" } }}",
+        "responseBody": "={{ { success: false, error_code: \"EMAIL_SEND_ERROR\", message: $json.error?.message || \"The Send Email node did not return an SMTP message id, so the email was NOT sent. Check that an SMTP credential is bound to the Send Email node.\" } }}",
         "options": {}
       },
       "id": "7a2f7f3b-2222-4b4c-9d2b-000000000005",
       "name": "Respond Email Failure",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [860, 340]
+      "position": [1040, 340]
     },
     {
       "parameters": {
@@ -101,6 +129,12 @@
       ]
     },
     "Send Email": {
+      "main": [
+        [{ "node": "Verify Send Result", "type": "main", "index": 0 }],
+        [{ "node": "Verify Send Result", "type": "main", "index": 0 }]
+      ]
+    },
+    "Verify Send Result": {
       "main": [
         [{ "node": "Respond Success", "type": "main", "index": 0 }],
         [{ "node": "Respond Email Failure", "type": "main", "index": 0 }]
