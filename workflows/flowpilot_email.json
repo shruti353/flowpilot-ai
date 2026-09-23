@@ -1,0 +1,114 @@
+{
+  "id": "flowpilot-email-v1",
+  "name": "FlowPilot - Email (send_email)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "flowpilot-email",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "7a2f7f3b-2222-4b4c-9d2b-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "flowpilot-email"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Payload contract (see backend/app/execution/adapters/n8n_email.py):\n// POST body = { request_id, plan_id, action_id, action: { tool, operation, parameters: { to, subject, body } } }.\n// The Webhook node always nests the actual POST body under `.body`\n// (alongside headers/params/query) - unwrap it here rather than treating\n// the whole wrapper as the payload.\nconst body = $input.item.json.body;\nconst action = body.action || {};\nconst params = action.parameters || {};\n\nif (action.tool !== 'email' || action.operation !== 'send_email') {\n  throw new Error(`Unsupported action for this workflow: expected email.send_email, got ${action.tool}.${action.operation}`);\n}\n\n// `to` must already be a non-empty array of real, deterministically-\n// resolved addresses (app/services/contact_resolution_service.py) - this\n// workflow does not look up or trust any other recipient information.\nconst to = Array.isArray(params.to)\n  ? params.to.filter((addr) => typeof addr === 'string' && addr.includes('@'))\n  : [];\nif (to.length === 0) {\n  throw new Error('Missing required parameter: to (must be a non-empty array of resolved email addresses)');\n}\nif (!params.subject || !params.body) {\n  throw new Error('Missing required parameters: subject and body are required');\n}\n\nreturn {\n  json: {\n    request_id: body.request_id,\n    plan_id: body.plan_id,\n    action_id: body.action_id,\n    to: to.join(','),\n    subject: params.subject,\n    text: params.body,\n  },\n};"
+      },
+      "id": "7a2f7f3b-2222-4b4c-9d2b-000000000002",
+      "name": "Validate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "onError": "continueErrorOutput",
+      "notes": "Expects the FlowPilot webhook POST body (nested under the Webhook node's .body) shaped as: { request_id, plan_id, action_id, action: { tool: 'email', operation: 'send_email', parameters: { to: string[], subject, body } } }. `to` must already be resolved, real addresses - never a name or team reference. Outputs { to, subject, text } consumed by the Send Email node below.",
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.FLOWPILOT_EMAIL_FROM_ADDRESS }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "text": "={{ $json.text }}",
+        "options": {}
+      },
+      "id": "7a2f7f3b-2222-4b4c-9d2b-000000000003",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "onError": "continueErrorOutput",
+      "position": [640, 220],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_WITH_YOUR_SMTP_CREDENTIAL_ID",
+          "name": "FlowPilot SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, message_id: $json.messageId, message: \"Email sent successfully\" } }}",
+        "options": {}
+      },
+      "id": "7a2f7f3b-2222-4b4c-9d2b-000000000004",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [860, 160]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 200,
+        "responseBody": "={{ { success: false, error_code: \"EMAIL_SEND_ERROR\", message: $json.error?.message || \"Failed to send the email.\" } }}",
+        "options": {}
+      },
+      "id": "7a2f7f3b-2222-4b4c-9d2b-000000000005",
+      "name": "Respond Email Failure",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [860, 340]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 200,
+        "responseBody": "={{ { success: false, error_code: \"INVALID_PAYLOAD\", message: $json.error?.message || \"The request payload was invalid.\" } }}",
+        "options": {}
+      },
+      "id": "7a2f7f3b-2222-4b4c-9d2b-000000000006",
+      "name": "Respond Invalid Payload",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [420, 460]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [{ "node": "Validate Payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate Payload": {
+      "main": [
+        [{ "node": "Send Email", "type": "main", "index": 0 }],
+        [{ "node": "Respond Invalid Payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Email": {
+      "main": [
+        [{ "node": "Respond Success", "type": "main", "index": 0 }],
+        [{ "node": "Respond Email Failure", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
