@@ -37,10 +37,18 @@ function ActionLine({ action }: { action: ActionExecutionResult }) {
     const isCalendarShape =
       typeof eventId === "string" || typeof link === "string" || typeof startDatetime === "string";
 
+    const recipients = action.result?.recipients;
+    const subject = action.result?.subject;
+    const isEmailShape = Array.isArray(recipients) || typeof subject === "string";
+
     return (
       <li className="execution-result__action execution-result__action--ok">
         <p>
-          {isCalendarShape ? "✓ Calendar event created successfully" : `✓ ${label} completed successfully`}
+          {isCalendarShape
+            ? "✓ Calendar event created successfully"
+            : isEmailShape
+              ? "✓ Email sent successfully"
+              : `✓ ${label} completed successfully`}
           {attemptNote}
         </p>
         {isCalendarShape ? (
@@ -52,6 +60,15 @@ function ActionLine({ action }: { action: ActionExecutionResult }) {
                 Open Calendar
               </a>
             )}
+          </>
+        ) : isEmailShape ? (
+          <>
+            {Array.isArray(recipients) && recipients.length > 0 && (
+              <p className="execution-result__detail">
+                Recipients: {recipients.filter((r): r is string => typeof r === "string").join(", ")}
+              </p>
+            )}
+            {typeof subject === "string" && <p className="execution-result__detail">Subject: {subject}</p>}
           </>
         ) : (
           action.result && <GenericResultDetails result={action.result} />
