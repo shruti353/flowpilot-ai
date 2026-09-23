@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     n8n_calendar_webhook_url: str | None = None
     n8n_timeout_seconds: float = 30.0
 
+    # --- Week 5 Day 5: email execution -------------------------------------
+    # Same pattern as the calendar webhook above: set either the full URL
+    # directly, or a path combined with n8n_base_url. Leaving both unset
+    # means email.send_email fails execution with a structured
+    # N8N_NOT_CONFIGURED error rather than silently doing nothing.
+    n8n_email_webhook_path: str = "/webhook/flowpilot-email"
+    n8n_email_webhook_url: str | None = None
+
     # --- Week 5: contacts/teams -------------------------------------------
     # SQLite file backing persistent Contacts/Teams storage - survives a
     # backend restart, unlike the in-memory PlanRepository. Never committed
@@ -69,6 +77,14 @@ class Settings(BaseSettings):
             return self.n8n_calendar_webhook_url
         if self.n8n_base_url:
             return self.n8n_base_url.rstrip("/") + "/" + self.n8n_calendar_webhook_path.lstrip("/")
+        return None
+
+    @property
+    def resolved_n8n_email_webhook_url(self) -> str | None:
+        if self.n8n_email_webhook_url:
+            return self.n8n_email_webhook_url
+        if self.n8n_base_url:
+            return self.n8n_base_url.rstrip("/") + "/" + self.n8n_email_webhook_path.lstrip("/")
         return None
 
 
