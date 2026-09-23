@@ -4,3 +4,9 @@
 
 # Local contacts/teams SQLite store - user data, never committed.
 *.db
+
+# Local n8n instance data (workflows, credentials, encryption key) used for
+# manual end-to-end testing. Never committed - a prior commit accidentally
+# included this and was purged from history (Week 5 Day 6).
+.n8n/
+node_modules/
