@@ -85,6 +85,14 @@ function ActionLine({ action }: { action: ActionExecutionResult }) {
     );
   }
 
+  if (action.status === "skipped") {
+    return (
+      <li className="execution-result__action execution-result__action--skipped">
+        — {label} was skipped
+      </li>
+    );
+  }
+
   return (
     <li className="execution-result__action execution-result__action--error">
       <p>

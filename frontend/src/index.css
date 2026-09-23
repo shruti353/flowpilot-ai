@@ -468,6 +468,20 @@ body {
   flex: 1;
 }
 
+/* Retry controls */
+
+.retry-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.retry-controls__note {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
 /* Decision result */
 
 .decision-result {
@@ -590,6 +604,10 @@ body {
 
 .execution-result__action--error {
   color: var(--danger);
+}
+
+.execution-result__action--skipped {
+  color: var(--text-muted);
 }
 
 .execution-result__detail {

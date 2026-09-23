@@ -35,9 +35,15 @@ export function ApprovalControls({
       <>
         <ExecutionResult plan={plan} />
         {RETRYABLE_STATUSES.has(plan.status) && (
-          <button type="button" className="btn btn--primary" disabled={isExecuting} onClick={onExecute}>
-            {isExecuting ? "Retrying..." : "Retry Execution"}
-          </button>
+          <div className="retry-controls">
+            <p className="retry-controls__note">
+              Retrying will only re-attempt the failed action(s) above - actions already marked succeeded will not
+              run again.
+            </p>
+            <button type="button" className="btn btn--primary" disabled={isExecuting} onClick={onExecute}>
+              {isExecuting ? "Retrying Failed Actions..." : "Retry Failed Actions"}
+            </button>
+          </div>
         )}
       </>
     );
