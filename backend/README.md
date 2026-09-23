@@ -7,14 +7,17 @@ can perform one real, narrowly-scoped external action through n8n.
 - **Week 1** — text in, validated structured plan out. No execution.
 - **Week 2** — the plan is *persisted* and sits `awaiting_approval` until
   a human approves, rejects, or cancels it. Still no execution.
-- **Week 3** (this update) — an `approved` plan can be explicitly
-  executed. Real execution exists ONLY for `calendar.create_event`,
-  performed via an n8n webhook that creates a Google Calendar event.
-  Every other tool/operation is reported as unsupported, never silently
-  skipped or faked as successful.
+- **Week 3** — an `approved` plan can be explicitly executed. Real
+  execution exists for `calendar.create_event`, performed via an n8n
+  webhook that creates a Google Calendar event.
+- **Week 5 Day 5** (this update) — real execution also exists for
+  `email.send_email`, performed via a second, dedicated n8n webhook that
+  sends a real email through an SMTP provider configured inside n8n.
+  `email.draft_email` and every other tool/operation remain reported as
+  unsupported, never silently skipped or faked as successful.
 
-No Gmail execution, no task-app integration, no database, no auth,
-no queues, no autonomous execution anywhere in this codebase.
+No task-app integration, no database, no auth, no queues, no autonomous
+execution anywhere in this codebase.
 
 ## 1. What's implemented
 
@@ -46,8 +49,9 @@ no queues, no autonomous execution anywhere in this codebase.
     into a concrete, timezone-aware ISO 8601 datetime using deterministic
     application logic - never the LLM.
   - Dispatches each action to a real adapter if one is registered
-    (today, only `calendar.create_event` -> n8n -> Google Calendar), or
-    reports `EXECUTION_NOT_SUPPORTED` otherwise.
+    (`calendar.create_event` -> n8n -> Google Calendar, and
+    `email.send_email` -> n8n -> a real SMTP provider), or reports
+    `EXECUTION_NOT_SUPPORTED` otherwise.
   - Updates plan/action state to `executed`, `partially_executed`, or
     `execution_failed`, and is safe against duplicate execution.
 - The LLM and LangGraph never see Google credentials, never call n8n,
@@ -83,17 +87,23 @@ EXECUTING
 EXECUTION SERVICE    (app/services/execution_service.py - deterministic,
  |                     no LLM, prevents duplicate execution)
  v
-EXECUTION ADAPTER     (app/execution/adapters/n8n_calendar.py)
+EXECUTION ADAPTER     (app/execution/adapters/n8n_calendar.py per action, OR
+ |                     app/execution/adapters/n8n_email.py, chosen by
+ |                     app/execution/dispatcher.py per (tool, operation))
+ v
+n8n WEBHOOK           (one webhook per adapter: flowpilot-calendar / flowpilot-email)
  |
  v
-n8n WEBHOOK
- |
- v
-GOOGLE CALENDAR
+GOOGLE CALENDAR / SMTP PROVIDER
  |
  v
 EXECUTED / PARTIALLY_EXECUTED / EXECUTION_FAILED
 ```
+
+A single plan may mix `calendar.create_event` and `email.send_email`
+actions - each is dispatched to its own adapter and n8n webhook
+independently; one failing never blocks or rolls back the other (see
+`_summarize` in `execution_service.py`).
 
 Full request path for planning:
 
@@ -120,7 +130,8 @@ app/execution/
 ├── n8n_client.py         HTTP client for n8n webhooks (swappable for tests)
 └── adapters/
     ├── base.py          ExecutionAdapter interface, ExecutionContext
-    └── n8n_calendar.py  calendar.create_event -> n8n -> Google Calendar
+    ├── n8n_calendar.py  calendar.create_event -> n8n -> Google Calendar
+    └── n8n_email.py     email.send_email -> n8n -> SMTP provider (Week 5 Day 5)
 
 app/services/execution_service.py
     - claims a plan for execution (approved -> executing), atomically
@@ -206,7 +217,8 @@ backend/
 └── README.md
 
 workflows/
-└── flowpilot_google_calendar.json  Importable n8n workflow (see section 7)
+├── flowpilot_google_calendar.json  Importable n8n workflow (see section 7)
+└── flowpilot_email.json            Importable n8n workflow (see section 7)
 
 frontend/src/
 ├── services/api.ts, types/plan.ts
@@ -251,11 +263,14 @@ cp .env.example .env
 | `DEFAULT_EVENT_DURATION_MINUTES` | `60` | Calendar event length when no end time is given |
 | `N8N_CALENDAR_WEBHOOK_URL` | *(unset)* | Full webhook URL, e.g. `http://localhost:5678/webhook/flowpilot-calendar` |
 | `N8N_BASE_URL` / `N8N_CALENDAR_WEBHOOK_PATH` | *(unset)* / `/webhook/flowpilot-calendar` | Alternative to the full URL above |
-| `N8N_TIMEOUT_SECONDS` | `30` | Timeout for the FastAPI -> n8n call |
+| `N8N_EMAIL_WEBHOOK_URL` | *(unset)* | Full webhook URL, e.g. `http://localhost:5678/webhook/flowpilot-email` |
+| `N8N_BASE_URL` / `N8N_EMAIL_WEBHOOK_PATH` | *(unset)* / `/webhook/flowpilot-email` | Alternative to the full URL above (shares `N8N_BASE_URL` with the calendar webhook) |
+| `N8N_TIMEOUT_SECONDS` | `30` | Timeout for the FastAPI -> n8n call (both webhooks) |
 
 If neither `N8N_CALENDAR_WEBHOOK_URL` nor `N8N_BASE_URL` is set,
 `calendar.create_event` fails execution with a structured
-`N8N_NOT_CONFIGURED` error - it never silently does nothing.
+`N8N_NOT_CONFIGURED` error - it never silently does nothing. The same is
+true for `email.send_email` and `N8N_EMAIL_WEBHOOK_URL`/`N8N_BASE_URL`.
 
 ## 7. n8n and Google Calendar setup
 
@@ -328,6 +343,74 @@ environment (the specific n8n build available here defers webhook
 registration in a way that didn't reflect normal n8n activation
 behavior); importing via the n8n **editor UI** as described above
 follows n8n's standard activation path and is the supported route.
+
+## 7b. n8n and email setup (Week 5 Day 5)
+
+Real execution for `email.send_email` follows exactly the same pattern as
+Calendar above, via a second, independent n8n webhook + workflow.
+
+1. In the same running n8n instance, **Workflows -> Import from File** and
+   select `workflows/flowpilot_email.json` (or
+   `n8n import:workflow --input=workflows/flowpilot_email.json`).
+2. Configure an email-sending credential **inside n8n only**:
+   - Open the imported workflow's "Send Email" node (n8n's core SMTP node,
+     `n8n-nodes-base.emailSend` - the simplest real provider available
+     without an OAuth consent flow).
+   - Under Credentials, create/select an **SMTP** credential: host, port,
+     user, and password/app password. For Gmail, this means an
+     [App Password](https://myaccount.google.com/apppasswords) on the
+     sending account (`smtp.gmail.com`, port 465 or 587) - regular account
+     passwords are rejected by Gmail's SMTP server. Any other SMTP
+     provider (Outlook, SendGrid's SMTP relay, a company mail server,
+     etc.) works the same way.
+   - Set the "From Email" the node sends as via the `FLOWPILOT_EMAIL_FROM_ADDRESS`
+     environment variable **inside n8n's own process environment** (not
+     this backend's `.env`) - or replace the node's `fromEmail` expression
+     with a literal address if you'd rather not use an env var there.
+3. Activate the workflow. This registers the production webhook at
+   `http://localhost:5678/webhook/flowpilot-email`.
+4. Point the backend at it: set `N8N_EMAIL_WEBHOOK_URL` in `.env` to that
+   URL (already the default in `.env.example`).
+
+The workflow itself:
+
+```
+FastAPI Webhook Request
+        |
+        v
+Validate Payload (Code node - checks action, recipients, subject, body)
+        |
+   (valid) --------------------> (invalid)
+        |                              |
+        v                              v
+   Send Email                  Respond Invalid Payload
+        |
+   (success) ------------------> (failure)
+        |                              |
+        v                              v
+  Respond Success              Respond Email Failure
+```
+
+Both failure-response nodes return HTTP 200 with
+`{"success": false, "error_code": "...", "message": "..."}`, exactly like
+the calendar workflow. The success node returns:
+```json
+{"success": true, "message_id": "...", "message": "Email sent successfully"}
+```
+
+`to` in the payload is always a JSON array of already-resolved, real
+email addresses (never a name, a team, or other free text) - the
+"Validate Payload" node additionally rejects any entry that doesn't
+contain `@` as defense in depth, on top of
+`app/services/contact_resolution_service.py` never letting an
+unresolved reference reach execution in the first place.
+
+**Status of live verification:** unlike the calendar workflow, this
+workflow's live send-and-deliver path has **not** been verified against a
+real mailbox in this environment - doing so requires a real SMTP/Gmail
+credential and a real, deliverable test recipient, neither of which this
+agent can supply on its own. See the Day 5 completion report for exactly
+what's needed to close this out.
 
 ## 8. Run the backend and frontend
 
@@ -412,9 +495,11 @@ A plan with both a supported and an unsupported action is reported
 exactly like this - `partially_executed`, never claimed as fully
 successful. Other failure codes an action's `error.code` may carry:
 `MISSING_PARAMETERS`, `DATETIME_NORMALIZATION_FAILED`,
-`N8N_NOT_CONFIGURED`, `N8N_TIMEOUT`, `N8N_UNREACHABLE`,
-`N8N_HTTP_ERROR`, `N8N_INVALID_RESPONSE`, or whatever `error_code` the
-n8n workflow itself returned (e.g. `CALENDAR_API_ERROR`).
+`UNRESOLVED_RECIPIENTS` (email only - no deterministically-resolved
+address was available), `N8N_NOT_CONFIGURED`, `N8N_TIMEOUT`,
+`N8N_UNREACHABLE`, `N8N_HTTP_ERROR`, `N8N_INVALID_RESPONSE`, or whatever
+`error_code` the n8n workflow itself returned (e.g. `CALENDAR_API_ERROR`,
+`EMAIL_SEND_ERROR`).
 
 ### Execution support matrix
 
@@ -424,8 +509,8 @@ n8n workflow itself returned (e.g. `CALENDAR_API_ERROR`).
 | calendar | get_event | ✅ | ❌ `EXECUTION_NOT_SUPPORTED` |
 | tasks | create_task | ✅ | ❌ `EXECUTION_NOT_SUPPORTED` |
 | tasks | get_task | ✅ | ❌ `EXECUTION_NOT_SUPPORTED` |
-| email | draft_email | ✅ | ❌ `EXECUTION_NOT_SUPPORTED` |
-| email | send_email | ✅ | ❌ `EXECUTION_NOT_SUPPORTED` |
+| email | draft_email | ✅ | ❌ `EXECUTION_NOT_SUPPORTED` (never silently promoted to a real send) |
+| email | send_email | ✅ | ✅ (via n8n -> SMTP provider) |
 | email | search_email | ✅ | ❌ `EXECUTION_NOT_SUPPORTED` |
 
 Adding real execution for another tool/operation means registering a new
@@ -460,19 +545,40 @@ pytest
   Week 1 planning behavior.
 - `tests/test_plans.py` - Week 2 approval lifecycle.
 - `tests/test_datetime_parser.py` - deterministic datetime normalization.
-- `tests/test_execution.py` - dispatcher/adapter unit tests, the full
-  approve -> execute flow, every non-`approved` status rejecting
-  execution, mixed-plan partial reporting, and duplicate-execution
-  prevention (asserted via a fake n8n client's recorded call count).
+- `tests/test_execution.py` - dispatcher/adapter unit tests for both
+  Calendar and Email, the full approve -> execute flow, every
+  non-`approved` status rejecting execution, mixed-plan partial
+  reporting, and duplicate-execution prevention (asserted via fake n8n
+  clients' recorded call counts, including per-webhook-URL call counts
+  for calendar+email plans).
+- `tests/test_n8n_workflow_contract.py` /
+  `tests/test_n8n_email_workflow_contract.py` - pin the exact payload
+  shape each n8n workflow JSON expects against what its adapter actually
+  sends, without needing a live n8n instance.
 
 ## 12. Security notes
 
-- Google OAuth client ID/secret and refresh tokens live **only** inside
-  n8n's credential store. This backend never stores, reads, or forwards
-  them, and they never appear in a prompt sent to Ollama.
-- `.env`, OAuth client secrets, refresh tokens, and n8n credential
-  exports must never be committed - only `.env.example` files with
-  placeholder values. `backend/.gitignore` excludes `.env`.
+- Google OAuth client ID/secret, refresh tokens, and SMTP
+  passwords/app passwords live **only** inside n8n's credential store.
+  This backend never stores, reads, or forwards them, and they never
+  appear in a prompt sent to Ollama.
+- `.env`, OAuth client secrets, refresh tokens, SMTP credentials, and n8n
+  credential exports must never be committed - only `.env.example` files
+  with placeholder values. `backend/.gitignore` (and the repo-root
+  `.gitignore`) exclude `.env` and `*.db`.
+- A real email address can only ever reach an email action through
+  `app/services/contact_resolution_service.py` (a saved Contact, a saved
+  Team's members, or a syntactically-validated literal address) - the LLM
+  never supplies one, and `N8nEmailSendAdapter` refuses to call n8n at
+  all if `resolved_recipients` is missing or empty
+  (`UNRESOLVED_RECIPIENTS`), regardless of what the raw `to` text says.
+- A plan stays in `needs_clarification` (never approvable, never
+  executable) for as long as any action - including an email action with
+  an unresolved recipient - is missing required information. Execution
+  is only ever reachable from `approved`.
+- `email.draft_email` has no registered adapter and can never execute -
+  only the exact operation `email.send_email` can, and only with a fully
+  resolved recipient list, subject, and body.
 - No authentication/authorization on this API yet - anyone who can reach
   it can approve/execute any `plan_id` they know. Fine for local
   development; not for exposing this API publicly as-is.
@@ -481,17 +587,37 @@ pytest
 
 - **Storage is in-memory only.** Restarting the backend loses every
   stored plan, including execution results.
-- Real execution exists only for `calendar.create_event`; every other
-  tool/operation is planned but never executed (see the matrix above).
+- Real execution exists for `calendar.create_event` and
+  `email.send_email`; every other tool/operation is planned but never
+  executed (see the matrix above).
 - Execution is synchronous - one HTTP request, no background queue, no
   retry-on-failure. A failed execution must be diagnosed and re-planned;
-  there is no "retry this action" endpoint yet.
+  there is no "retry this action" endpoint yet (retrying means calling
+  `/execute` again on the same plan).
+- **No exactly-once delivery guarantee.** Duplicate-execution prevention
+  (see above) only protects an action already recorded as `succeeded` in
+  this backend's own state - it cannot protect against a case where n8n
+  (or the downstream Google Calendar / SMTP call) actually completed but
+  the HTTP response back to FastAPI was lost (e.g. a timeout on an
+  otherwise-successful send). Retrying after that specific failure mode
+  could, in principle, send a duplicate email or create a duplicate
+  calendar event. This is a pre-existing limitation of the synchronous,
+  response-based design (not something Week 5 Day 5 introduced) and is
+  not currently mitigated by an idempotency key on the n8n side.
 - No authentication/authorization.
 - Datetime normalization depends on `dateparser`'s coverage of natural
   language; unusual phrasings may fail normalization (safely, as a
   structured `DATETIME_NORMALIZATION_FAILED`, never a guess).
 - Plan quality depends on the chosen local Ollama model; smaller models
   may occasionally violate the JSON contract (surfaces as an `error`
-  plan) or add actions beyond what was asked (observed with `llama3.2:3b`
-  during testing - harmless, since anything unsupported is honestly
-  reported rather than executed).
+  plan), add actions beyond what was asked, or choose `email.draft_email`
+  instead of `email.send_email` for a request that did ask to send
+  (observed with `llama3.2:3b` during testing) - harmless either way,
+  since anything unsupported is honestly reported as `unsupported` rather
+  than executed, but it means a "send an email" request isn't guaranteed
+  to actually reach the email adapter on every run of a small local
+  model.
+- The email n8n workflow (`workflows/flowpilot_email.json`) has been
+  validated structurally (JSON schema, node wiring, payload-contract
+  tests) but its live send-and-deliver path has not been verified against
+  a real mailbox in this environment - see section 7b.
