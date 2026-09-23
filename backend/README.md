@@ -356,6 +356,11 @@ Calendar above, via a second, independent n8n webhook + workflow.
    - Open the imported workflow's "Send Email" node (n8n's core SMTP node,
      `n8n-nodes-base.emailSend` - the simplest real provider available
      without an OAuth consent flow).
+   - **You must explicitly bind a credential to this node.** The exported
+     workflow deliberately ships with NO credential reference: an earlier
+     version shipped a placeholder credential id, which made the node look
+     configured in the editor while failing to resolve at run time. Creating
+     a credential is not enough - select it on the node.
    - Under Credentials, create/select an **SMTP** credential: host, port,
      user, and password/app password. For Gmail, this means an
      [App Password](https://myaccount.google.com/apppasswords) on the
@@ -365,8 +370,18 @@ Calendar above, via a second, independent n8n webhook + workflow.
      etc.) works the same way.
    - Set the "From Email" the node sends as via the `FLOWPILOT_EMAIL_FROM_ADDRESS`
      environment variable **inside n8n's own process environment** (not
-     this backend's `.env`) - or replace the node's `fromEmail` expression
-     with a literal address if you'd rather not use an env var there.
+     this backend's `.env`). n8n blocks `$env` access inside expressions by
+     default, so it must be started with **both**:
+     ```bash
+     FLOWPILOT_EMAIL_FROM_ADDRESS=you@example.com \
+     N8N_BLOCK_ENV_ACCESS_IN_NODE=false \
+     npx n8n start
+     ```
+     Without `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` the Send Email node fails
+     with `access to env vars denied` and the workflow correctly reports
+     `EMAIL_SEND_ERROR` (nothing is sent). If you would rather not enable
+     env access, replace the node's `fromEmail` expression with a literal
+     address in the n8n editor instead.
 3. Activate the workflow. This registers the production webhook at
    `http://localhost:5678/webhook/flowpilot-email`.
 4. Point the backend at it: set `N8N_EMAIL_WEBHOOK_URL` in `.env` to that
@@ -385,11 +400,25 @@ Validate Payload (Code node - checks action, recipients, subject, body)
         v                              v
    Send Email                  Respond Invalid Payload
         |
-   (success) ------------------> (failure)
+        | (BOTH outputs - success and error)
+        v
+Verify Send Result (IF - requires a real SMTP messageId)
+        |
+   (has messageId) -----------> (no messageId)
         |                              |
         v                              v
   Respond Success              Respond Email Failure
 ```
+
+**Why the "Verify Send Result" gate exists.** Wiring Send Email's outputs
+straight to the Respond nodes is not safe: when the node fails before it
+ever reaches SMTP (for example, its credential cannot be resolved), it
+passes its *input* through on output 0 - the same output a successful send
+uses. That produced `{"success": true}` for an email that was never sent,
+which the backend then faithfully recorded as a succeeded action. Both
+outputs now feed the IF gate, and only an item carrying a real
+`messageId` can reach "Respond Success", so success is proven rather than
+inferred from branch routing.
 
 Both failure-response nodes return HTTP 200 with
 `{"success": false, "error_code": "...", "message": "..."}`, exactly like
