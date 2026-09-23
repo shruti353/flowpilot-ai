@@ -41,6 +41,13 @@ available; omit a key entirely, do not guess, when you don't know it):
 - draft_email / send_email: to, subject, body
 - search_email: query
 
+Note on draft_email vs send_email: use "send_email" whenever the request
+asks to send, email, or notify someone now (e.g. "email them", "send an
+email to X", "let them know by email"). Use "draft_email" only when the
+request explicitly asks only to draft, prepare, or write an email without
+sending it. When in doubt, prefer "send_email" - a human still has to
+approve every action before anything is sent.
+
 Note on create_event date/time: do NOT output "date", "time", or "datetime"
 in "parameters" or "missing_information" yourself for calendar.create_event
 - a separate deterministic step re-derives exactly what date and/or time
