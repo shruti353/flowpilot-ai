@@ -22,8 +22,8 @@ def get_adapter(tool: ToolName, operation: OperationName) -> ExecutionAdapter | 
     return _REGISTRY.get((tool, operation))
 
 
-# Week 3 scope: real execution exists only for calendar.create_event.
-# Week 5 Day 5: real execution also exists for email.send_email.
+# Real execution exists for calendar.create_event (Week 3) and
+# email.send_email (Week 5).
 # Every other tool/operation intentionally has no adapter and is reported
 # as EXECUTION_NOT_SUPPORTED - see app/execution/executor.py. In particular,
 # email.draft_email is NOT registered here - a "draft" is never silently

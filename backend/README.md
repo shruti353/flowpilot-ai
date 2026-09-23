@@ -1,8 +1,10 @@
 # FlowPilot AI - Backend
 
-FlowPilot AI turns a free-text request into a structured execution plan,
-holds it for **explicit human approval**, and - only after that approval -
-can perform one real, narrowly-scoped external action through n8n.
+FlowPilot AI turns a free-text request into a structured, multi-action
+execution plan, holds it for **explicit human approval**, and - only after
+that approval - performs a narrow set of real external actions through n8n
+(creating a Google Calendar event, and sending an email to recipients
+resolved from its own Contacts/Teams store).
 
 - **Week 1** — text in, validated structured plan out. No execution.
 - **Week 2** — the plan is *persisted* and sits `awaiting_approval` until
@@ -10,14 +12,21 @@ can perform one real, narrowly-scoped external action through n8n.
 - **Week 3** — an `approved` plan can be explicitly executed. Real
   execution exists for `calendar.create_event`, performed via an n8n
   webhook that creates a Google Calendar event.
-- **Week 5 Day 5** (this update) — real execution also exists for
-  `email.send_email`, performed via a second, dedicated n8n webhook that
-  sends a real email through an SMTP provider configured inside n8n.
+- **Week 4** — a plan missing required details is held at
+  `needs_clarification` and can be completed field-by-field through
+  `POST /api/v1/plans/{plan_id}/fields`, then re-validated and returned to
+  `awaiting_approval`. Execution became retryable and idempotent per
+  action.
+- **Week 5** (this update) — persistent **Contacts/Teams**, deterministic
+  **recipient resolution**, **multi-action plans** (up to 3 actions), and
+  real execution for `email.send_email` via a second, dedicated n8n
+  webhook that sends through an SMTP provider configured inside n8n.
   `email.draft_email` and every other tool/operation remain reported as
   unsupported, never silently skipped or faked as successful.
 
-No task-app integration, no database, no auth, no queues, no autonomous
-execution anywhere in this codebase.
+No task-app integration, no auth, no queues, no autonomous execution
+anywhere in this codebase. The only database is a local SQLite file for
+Contacts/Teams; plans themselves remain in memory.
 
 ## 1. What's implemented
 
@@ -57,22 +66,70 @@ execution anywhere in this codebase.
 - The LLM and LangGraph never see Google credentials, never call n8n,
   and never decide whether a plan may execute.
 
+**Week 4 - interactive completion + idempotent retries**
+- A plan whose actions are missing required information is stored as
+  `needs_clarification` - never approvable, never executable, as-is.
+- `POST /api/v1/plans/{plan_id}/fields` accepts user-supplied values for
+  exactly the fields an action reported as missing, re-runs the same
+  deterministic enrichment/validation pipeline, and lands the plan back in
+  `awaiting_approval` once nothing is missing. It never auto-approves.
+- Each action carries typed `missing_fields` (label + control type), so the
+  UI can render a form without guessing.
+- `partially_executed` / `execution_failed` plans may be re-executed; any
+  action that already succeeded is carried forward and never re-dispatched.
+
+**Week 5 - contacts, multi-action plans, and real email**
+- **Contacts/Teams** persist in SQLite (`flowpilot_contacts.db`, gitignored)
+  and survive restarts, unlike the in-memory plan store. Full CRUD at
+  `/api/v1/contacts` and `/api/v1/teams` (see section 9b).
+- **Deterministic recipient resolution**: the LLM identifies *who* a request
+  refers to ("the AI team"), and
+  `app/services/contact_resolution_service.py` turns that reference into
+  real addresses from stored records - matching a team name (case- and
+  leading-article-insensitive), a unique contact name, or a syntactically
+  valid literal address. **This is the only code path that can produce an
+  email address.** A reference that cannot be resolved becomes
+  missing-information with a specific reason, never a guessed address.
+- **Multi-action plans**: one request may produce up to
+  `MAX_ACTIONS_PER_PLAN` (3) actions, each with independent parameters,
+  missing-information, and execution state. A request that would exceed
+  that limit is rejected outright rather than truncated.
+- **Real email execution** for `email.send_email` through a dedicated n8n
+  webhook (section 7b).
+
 ## 2. Architecture
 
 ```
 USER
  |
  v
-GENERATE PLAN        (LangGraph + Ollama - unchanged since Week 1)
+FASTAPI              (app/api/v1 - no business logic, no LLM calls)
  |
  v
-VALIDATE PLAN        (Pydantic - unchanged since Week 1)
+GENERATE PLAN        (LangGraph + Ollama - the ONLY LLM step)
+ |
+ v
+DETERMINISTIC POST-PROCESSING (no LLM from here down, ever)
+ |  INFER_TITLES        derive a title from the user's own words
+ |  ENRICH_DATETIME     "tomorrow at 3 PM" -> concrete ISO 8601 + timezone
+ |  RESOLVE_RECIPIENTS  "the AI team" -> real addresses from Contacts/Teams
+ |  FILTER_OPTIONAL     drop genuinely-optional fields from missing_information
+ |
+ v
+VALIDATE PLAN        (Pydantic - the raw LLM output is never trusted)
  |
  v
 STORE PLAN           (app/repositories/plan_repository.py - in memory)
  |
- v
-AWAITING APPROVAL
+ +---------------------------+
+ |                           |
+ v                           v
+AWAITING APPROVAL       NEEDS CLARIFICATION   (something required is missing;
+ |                           |                 never approvable/executable)
+ |                           | POST .../fields (user supplies ONLY the
+ |                           |                  missing fields)
+ |                           v
+ |                      re-validate ----> back to AWAITING APPROVAL
  |
  +-------------------+
  |                   |
@@ -197,16 +254,30 @@ backend/
 │   ├── main.py                     FastAPI app, CORS, /health
 │   ├── api/v1/
 │   │   ├── agent.py                POST /api/v1/agent/plan
-│   │   └── plans.py                GET/approve/reject/cancel/execute
-│   ├── agent/                      LangGraph planning (unchanged since Week 1)
+│   │   ├── plans.py                GET/approve/reject/cancel/execute/fields
+│   │   ├── contacts.py             Contacts CRUD            (Week 5)
+│   │   └── teams.py                Teams + membership CRUD  (Week 5)
+│   ├── agent/
+│   │   ├── graph.py                UNDERSTAND -> GENERATE -> INFER_TITLES ->
+│   │   │                           ENRICH_DATETIME -> RESOLVE_RECIPIENTS ->
+│   │   │                           FILTER_OPTIONAL_FIELDS -> VALIDATE
+│   │   └── nodes/                  One module per node; all deterministic
+│   │                               except GENERATE_PLAN
 │   ├── models/
-│   │   ├── request.py, action.py, execution_plan.py   (Week 1, unchanged)
+│   │   ├── request.py, action.py, execution_plan.py
+│   │   ├── missing_field.py, field_schema.py   Typed missing-field specs
+│   │   ├── contact.py              Contact / Team / ResolvedRecipient
 │   │   └── stored_plan.py          Lifecycle status + response envelopes
-│   ├── repositories/plan_repository.py   In-memory plan store
+│   ├── repositories/
+│   │   ├── plan_repository.py      In-memory plan store (lost on restart)
+│   │   └── contacts_repository.py  SQLite Contacts/Teams (persistent)
 │   ├── services/
 │   │   ├── ollama_service.py       LLM provider abstraction
 │   │   ├── approval_service.py     Deterministic approval state machine
-│   │   └── execution_service.py    Deterministic execution orchestration
+│   │   ├── execution_service.py    Deterministic execution orchestration
+│   │   ├── plan_update_service.py  Missing-field completion + re-validation
+│   │   ├── plan_validation.py      Shared raw-plan -> ExecutionPlan pipeline
+│   │   └── contact_resolution_service.py  The ONLY source of an address
 │   ├── execution/                  See "Execution architecture" above
 │   ├── utils/datetime_parser.py    Deterministic datetime normalization
 │   ├── core/{config.py,logging.py}
@@ -266,6 +337,7 @@ cp .env.example .env
 | `N8N_EMAIL_WEBHOOK_URL` | *(unset)* | Full webhook URL, e.g. `http://localhost:5678/webhook/flowpilot-email` |
 | `N8N_BASE_URL` / `N8N_EMAIL_WEBHOOK_PATH` | *(unset)* / `/webhook/flowpilot-email` | Alternative to the full URL above (shares `N8N_BASE_URL` with the calendar webhook) |
 | `N8N_TIMEOUT_SECONDS` | `30` | Timeout for the FastAPI -> n8n call (both webhooks) |
+| `CONTACTS_DB_PATH` | `<repo-root>/flowpilot_contacts.db` | SQLite file backing Contacts/Teams. Holds real contact data - gitignored, never committed. |
 
 If neither `N8N_CALENDAR_WEBHOOK_URL` nor `N8N_BASE_URL` is set,
 `calendar.create_event` fails execution with a structured
@@ -475,6 +547,25 @@ the full response shape.
 ### `GET /api/v1/plans/{plan_id}` / `.../approve` / `.../reject` / `.../cancel`
 Unchanged from Week 2. State transitions only, no execution.
 
+### `POST /api/v1/plans/{plan_id}/fields` (Week 4)
+
+Fills in the fields an action reported as missing, for a plan in
+`needs_clarification`. Body:
+
+```json
+{"actions": [{"action_id": "action_2", "values": {"to": "AI Team"}}]}
+```
+
+- Only fields currently listed in that action's `missing_information` are
+  accepted; anything else is rejected, so this is not a general "edit any
+  field" API.
+- Supplied values re-run the same deterministic pipeline as planning - a
+  `to` value is still resolved through Contacts/Teams and is never trusted
+  as a literal address just because a human typed it.
+- Returns the plan at `awaiting_approval` once nothing is missing, or still
+  at `needs_clarification` with updated hints. **Never auto-approves.**
+- `409` if the plan is not in `needs_clarification`.
+
 ### `POST /api/v1/plans/{plan_id}/execute` (new)
 
 Executes an `approved` plan's actions exactly once.
@@ -530,6 +621,43 @@ address was available), `N8N_NOT_CONFIGURED`, `N8N_TIMEOUT`,
 `error_code` the n8n workflow itself returned (e.g. `CALENDAR_API_ERROR`,
 `EMAIL_SEND_ERROR`).
 
+### `/api/v1/contacts` and `/api/v1/teams` (Week 5)
+
+FlowPilot's persistent memory of *people*. Backed by SQLite
+(`flowpilot_contacts.db` at the repo root - gitignored, it holds real
+contact data), so unlike plans it survives a restart.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/contacts` | `{name, email}`. **Idempotent by email** (case-insensitive) - re-creating an existing email returns the existing contact instead of a duplicate row. |
+| `GET` | `/contacts` / `/contacts/{id}` | List / fetch one. |
+| `PATCH` | `/contacts/{id}` | Rename or change email. Rejects an email already used by a *different* contact (`409`). |
+| `DELETE` | `/contacts/{id}` | Cascades to team memberships. |
+| `POST` | `/teams` | `{name}`. **Idempotent by normalized name** - "AI Team", "ai team" and "the AI team" are all the same team. |
+| `GET` | `/teams` / `/teams/{id}` | List / fetch one with members. |
+| `PATCH` | `/teams/{id}` | Rename; rejects a name collision (`409`). |
+| `DELETE` | `/teams/{id}` | Cascades to memberships. |
+| `POST` | `/teams/{id}/members` | Add by `contact_id`, or create-or-reuse inline with `{name, email}`. Re-adding an existing member is a no-op. |
+| `GET`/`DELETE` | `/teams/{id}/members[/{contact_id}]` | List / remove a member. |
+
+**How a reference becomes an address** (`contact_resolution_service.py`),
+in order:
+
+1. Contains `@` → validated as a literal address (syntax only, no delivery
+   check). Invalid → unresolved with the reason.
+2. Matches a team name (case- and leading-article-insensitive) → **all**
+   its members. An empty team is unresolved ("has no members yet"), not an
+   empty send.
+3. Matches exactly one contact name (case-insensitive) → that contact.
+4. Matches **several** contacts with the same name → unresolved
+   ("use an email address instead"). Ambiguity is never guessed.
+5. Otherwise → unresolved: "No saved team or contact matches 'X'."
+
+An unresolved reference puts `to` into the action's
+`missing_information` with that reason as a `hint`, which forces the plan
+to `needs_clarification`. **There is no path from an unresolved reference
+to an execution.**
+
 ### Execution support matrix
 
 | Tool | Operation | Can be **planned** | Can be **executed** |
@@ -561,9 +689,11 @@ is executed and no time is guessed.
 ## 11. Run tests
 
 Tests mock the LLM provider (`ollama_service`) and the n8n HTTP client
-(`execution.n8n_client`), and reset the in-memory plan repository between
-tests. The whole suite runs without a live Ollama server, a live n8n
-instance, or Google Calendar credentials.
+(`execution.n8n_client`), reset the in-memory plan repository between
+tests, and give each test a fresh in-memory Contacts/Teams database - the
+real `flowpilot_contacts.db` is never touched. The whole suite runs
+without a live Ollama server, a live n8n instance, SMTP credentials, or
+Google Calendar credentials.
 
 ```bash
 cd backend
@@ -583,7 +713,14 @@ pytest
 - `tests/test_n8n_workflow_contract.py` /
   `tests/test_n8n_email_workflow_contract.py` - pin the exact payload
   shape each n8n workflow JSON expects against what its adapter actually
-  sends, without needing a live n8n instance.
+  sends, without needing a live n8n instance. The email one also guards
+  the false-success regression described in section 7b.
+- `tests/test_contacts_repository.py` / `tests/test_contacts_api.py` -
+  Contacts/Teams persistence, idempotent creation, cascade deletes.
+- `tests/test_recipient_resolution.py` - the resolution rules in section
+  9b, including ambiguity and unknown references staying unresolved.
+- `tests/test_title_inference.py` / `tests/test_datetime_extraction.py` -
+  the deterministic post-processing nodes.
 
 ## 12. Security notes
 
