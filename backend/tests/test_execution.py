@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.execution.adapters.n8n_calendar as n8n_calendar_module
+import app.execution.adapters.n8n_email as n8n_email_module
 import app.execution.n8n_client as n8n_client
 import app.services.ollama_service as ollama_service
 from app.core.config import Settings
@@ -97,15 +98,21 @@ def _create_and_approve_plan(raw_plan: dict = CALENDAR_ONLY_RAW_PLAN, text: str 
     return plan_id
 
 
+CALENDAR_WEBHOOK_URL = "http://n8n.test/webhook/flowpilot-calendar"
+EMAIL_WEBHOOK_URL = "http://n8n.test/webhook/flowpilot-email"
+
+
 @pytest.fixture
 def configured_settings(monkeypatch):
     settings = Settings(
-        n8n_calendar_webhook_url="http://n8n.test/webhook/flowpilot-calendar",
+        n8n_calendar_webhook_url=CALENDAR_WEBHOOK_URL,
+        n8n_email_webhook_url=EMAIL_WEBHOOK_URL,
         flowpilot_timezone="Asia/Kolkata",
         default_event_duration_minutes=60,
         n8n_timeout_seconds=5,
     )
     monkeypatch.setattr(n8n_calendar_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(n8n_email_module, "get_settings", lambda: settings)
     return settings
 
 
@@ -113,13 +120,36 @@ def configured_settings(monkeypatch):
 def unconfigured_settings(monkeypatch):
     settings = Settings(
         n8n_calendar_webhook_url=None,
+        n8n_email_webhook_url=None,
         n8n_base_url=None,
         flowpilot_timezone="Asia/Kolkata",
         default_event_duration_minutes=60,
         n8n_timeout_seconds=5,
     )
     monkeypatch.setattr(n8n_calendar_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(n8n_email_module, "get_settings", lambda: settings)
     return settings
+
+
+class PerUrlFakeN8nClient:
+    """Test double for N8nClient that returns a different canned response per
+    webhook URL - needed to simulate "calendar succeeds, email fails" (or
+    vice versa) within a single multi-action execution, which the shared
+    FakeN8nClient (one canned response for every call) can't express."""
+
+    def __init__(self, responses: dict[str, dict] | None = None, errors: dict[str, Exception] | None = None):
+        self.responses = responses or {}
+        self.errors = errors or {}
+        self.calls: list[dict] = []
+
+    async def post(self, url: str, payload: dict, timeout_seconds: float):
+        self.calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
+        if url in self.errors:
+            raise self.errors[url]
+        return self.responses.get(url, {"success": True})
+
+    def calls_to(self, url: str) -> list[dict]:
+        return [call for call in self.calls if call["url"] == url]
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +164,13 @@ def test_dispatcher_finds_adapter_for_calendar_create_event():
     assert adapter is not None
 
 
+def test_dispatcher_finds_adapter_for_email_send_email():
+    from app.models.action import OperationName, ToolName
+
+    adapter = get_adapter(ToolName.email, OperationName.send_email)
+    assert adapter is not None
+
+
 @pytest.mark.parametrize(
     "tool,operation",
     [
@@ -141,7 +178,6 @@ def test_dispatcher_finds_adapter_for_calendar_create_event():
         ("tasks", "create_task"),
         ("tasks", "get_task"),
         ("email", "draft_email"),
-        ("email", "send_email"),
         ("email", "search_email"),
     ],
 )
@@ -334,6 +370,193 @@ async def test_n8n_not_configured_marks_action_failed_without_a_client_call(unco
     n8n_client.set_n8n_client(fake_client)
 
     result = await execute_action(_action(), ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.status == ActionExecutionStatus.failed
+    assert result.error.code == "N8N_NOT_CONFIGURED"
+    assert fake_client.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Week 5 Day 5: email.send_email adapter (direct unit tests)
+# ---------------------------------------------------------------------------
+
+
+def _email_action(**overrides) -> Action:
+    defaults = dict(
+        action_id="action_2",
+        tool="email",
+        operation="send_email",
+        parameters={
+            "to": "AI Team",
+            "subject": "Project Update",
+            "body": "Here is the update.",
+            # Only ever set by deterministic resolution (RESOLVE_RECIPIENTS /
+            # PlanUpdateService) - never by the LLM. See
+            # app/services/contact_resolution_service.py.
+            "resolved_recipients": [
+                {"name": "Alice", "email": "alice@example.com"},
+                {"name": "Bob", "email": "bob@example.com"},
+            ],
+        },
+    )
+    defaults.update(overrides)
+    return Action(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_email_adapter_succeeds_with_multiple_resolved_recipients(configured_settings):
+    fake_client = FakeN8nClient(result={"success": True, "message_id": "msg_123"})
+    n8n_client.set_n8n_client(fake_client)
+
+    result = await execute_action(_email_action(), ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.status == ActionExecutionStatus.succeeded
+    assert result.result["recipients"] == ["alice@example.com", "bob@example.com"]
+    assert result.result["message_id"] == "msg_123"
+    assert len(fake_client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_email_adapter_sends_the_documented_payload_contract(configured_settings):
+    # Pins the exact payload shape workflows/flowpilot_email.json's
+    # "Validate Payload" node expects - mirrors the calendar adapter's
+    # equivalent pinning test above.
+    fake_client = FakeN8nClient(result={"success": True, "message_id": "msg_123"})
+    n8n_client.set_n8n_client(fake_client)
+
+    await execute_action(_email_action(), ExecutionContext(request_id="req-1", plan_id="plan-1"))
+
+    assert len(fake_client.calls) == 1
+    call = fake_client.calls[0]
+    payload = call["payload"]
+
+    assert set(payload.keys()) == {"request_id", "plan_id", "action_id", "action"}
+    assert payload["request_id"] == "req-1"
+    assert payload["plan_id"] == "plan-1"
+    assert payload["action_id"] == "action_2"
+
+    action_payload = payload["action"]
+    assert action_payload["tool"] == "email"
+    assert action_payload["operation"] == "send_email"
+
+    parameters = action_payload["parameters"]
+    assert set(parameters.keys()) == {"to", "subject", "body"}
+    # Only the deterministically-resolved addresses ever reach the payload -
+    # never the raw "to" reference ("AI Team") the LLM saw.
+    assert parameters["to"] == ["alice@example.com", "bob@example.com"]
+    assert parameters["subject"] == "Project Update"
+    assert parameters["body"] == "Here is the update."
+
+
+@pytest.mark.asyncio
+async def test_email_adapter_fails_without_resolved_recipients(configured_settings):
+    # No deterministic resolution ever ran (or it failed) - "to" being
+    # present as free text is never trusted as an address.
+    fake_client = FakeN8nClient()
+    n8n_client.set_n8n_client(fake_client)
+
+    action = _email_action(parameters={"to": "Unknown Team", "subject": "Update", "body": "Hi"})
+    result = await execute_action(action, ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.status == ActionExecutionStatus.failed
+    assert result.error.code == "UNRESOLVED_RECIPIENTS"
+    assert fake_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_email_adapter_fails_without_subject(configured_settings):
+    fake_client = FakeN8nClient()
+    n8n_client.set_n8n_client(fake_client)
+
+    action = _email_action(
+        parameters={
+            "to": "AI Team",
+            "body": "Hi",
+            "resolved_recipients": [{"name": "Alice", "email": "alice@example.com"}],
+        }
+    )
+    result = await execute_action(action, ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.status == ActionExecutionStatus.failed
+    assert result.error.code == "MISSING_PARAMETERS"
+    assert fake_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_email_adapter_fails_without_body(configured_settings):
+    fake_client = FakeN8nClient()
+    n8n_client.set_n8n_client(fake_client)
+
+    action = _email_action(
+        parameters={
+            "to": "AI Team",
+            "subject": "Update",
+            "resolved_recipients": [{"name": "Alice", "email": "alice@example.com"}],
+        }
+    )
+    result = await execute_action(action, ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.status == ActionExecutionStatus.failed
+    assert result.error.code == "MISSING_PARAMETERS"
+    assert fake_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_draft_email_action_never_reaches_the_email_adapter(configured_settings):
+    # email.draft_email has no registered adapter (see dispatcher.py) - a
+    # "draft" request is never silently promoted to a real send.
+    fake_client = FakeN8nClient()
+    n8n_client.set_n8n_client(fake_client)
+
+    action = Action(
+        action_id="action_2",
+        tool="email",
+        operation="draft_email",
+        parameters={
+            "to": "AI Team",
+            "subject": "Update",
+            "body": "Hi",
+            "resolved_recipients": [{"name": "Alice", "email": "alice@example.com"}],
+        },
+    )
+    result = await execute_action(action, ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.status == ActionExecutionStatus.unsupported
+    assert result.error.code == "EXECUTION_NOT_SUPPORTED"
+    assert fake_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_email_n8n_failure_response_marks_action_failed(configured_settings):
+    n8n_client.set_n8n_client(
+        FakeN8nClient(result={"success": False, "error_code": "SMTP_AUTH_FAILED", "message": "bad credentials"})
+    )
+
+    result = await execute_action(_email_action(), ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.status == ActionExecutionStatus.failed
+    assert result.error.code == "SMTP_AUTH_FAILED"
+    assert result.error.message == "bad credentials"
+
+
+@pytest.mark.asyncio
+async def test_email_n8n_unreachable_marks_action_failed(configured_settings):
+    n8n_client.set_n8n_client(
+        FakeN8nClient(error=n8n_client.N8nWebhookError("N8N_UNREACHABLE", "connection refused"))
+    )
+
+    result = await execute_action(_email_action(), ExecutionContext(request_id="r1", plan_id="p1"))
+
+    assert result.status == ActionExecutionStatus.failed
+    assert result.error.code == "N8N_UNREACHABLE"
+
+
+@pytest.mark.asyncio
+async def test_email_n8n_not_configured_marks_action_failed_without_a_client_call(unconfigured_settings):
+    fake_client = FakeN8nClient()
+    n8n_client.set_n8n_client(fake_client)
+
+    result = await execute_action(_email_action(), ExecutionContext(request_id="r1", plan_id="p1"))
 
     assert result.status == ActionExecutionStatus.failed
     assert result.error.code == "N8N_NOT_CONFIGURED"
@@ -655,15 +878,15 @@ async def test_unsupported_action_error_is_classified_as_unsupported_stage(confi
 
 
 # ---------------------------------------------------------------------------
-# Week 5: multi-action plans - email has no execution adapter yet (by
-# design - no unsafe fake execution path was built), calendar still
-# executes and retries independently.
+# Week 5 Day 3/4: multi-action plans - email.draft_email genuinely has no
+# execution adapter (by design - a "draft" is never silently promoted to a
+# real send), calendar still executes and retries independently.
 # ---------------------------------------------------------------------------
 
 
-CALENDAR_AND_EMAIL_RAW_PLAN = {
+CALENDAR_AND_DRAFT_EMAIL_RAW_PLAN = {
     "intent": "productivity_workflow",
-    "summary": "Schedule a meeting and email about it.",
+    "summary": "Schedule a meeting and draft an email about it.",
     "actions": [
         {
             "action_id": "action_1",
@@ -675,20 +898,22 @@ CALENDAR_AND_EMAIL_RAW_PLAN = {
         {
             "action_id": "action_2",
             "tool": "email",
-            "operation": "send_email",
+            "operation": "draft_email",
             "parameters": {"to": "adarsh@example.com", "subject": "Update", "body": "Hi"},
             "missing_information": [],
         },
     ],
 }
-CALENDAR_AND_EMAIL_TEXT = "Schedule a meeting with the AI team tomorrow at 3 PM and email adarsh@example.com about it."
+CALENDAR_AND_DRAFT_EMAIL_TEXT = (
+    "Schedule a meeting with the AI team tomorrow at 3 PM and draft an email to adarsh@example.com about it."
+)
 
 
-def test_email_action_is_unsupported_and_does_not_block_calendar_execution(configured_settings):
+def test_draft_email_action_is_unsupported_and_does_not_block_calendar_execution(configured_settings):
     n8n_client.set_n8n_client(
         FakeN8nClient(result={"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"})
     )
-    plan_id = _create_and_approve_plan(CALENDAR_AND_EMAIL_RAW_PLAN, text=CALENDAR_AND_EMAIL_TEXT)
+    plan_id = _create_and_approve_plan(CALENDAR_AND_DRAFT_EMAIL_RAW_PLAN, text=CALENDAR_AND_DRAFT_EMAIL_TEXT)
 
     response = client.post(f"/api/v1/plans/{plan_id}/execute")
 
@@ -702,14 +927,14 @@ def test_email_action_is_unsupported_and_does_not_block_calendar_execution(confi
     assert by_action_id["action_2"]["error"]["code"] == "EXECUTION_NOT_SUPPORTED"
 
 
-def test_retrying_calendar_and_email_plan_never_recalls_n8n_for_the_succeeded_calendar_action(
+def test_retrying_calendar_and_draft_email_plan_never_recalls_n8n_for_the_succeeded_calendar_action(
     configured_settings,
 ):
     fake_client = FakeN8nClient(
         result={"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"}
     )
     n8n_client.set_n8n_client(fake_client)
-    plan_id = _create_and_approve_plan(CALENDAR_AND_EMAIL_RAW_PLAN, text=CALENDAR_AND_EMAIL_TEXT)
+    plan_id = _create_and_approve_plan(CALENDAR_AND_DRAFT_EMAIL_RAW_PLAN, text=CALENDAR_AND_DRAFT_EMAIL_TEXT)
 
     first = client.post(f"/api/v1/plans/{plan_id}/execute")
     assert first.status_code == 200
@@ -726,3 +951,169 @@ def test_retrying_calendar_and_email_plan_never_recalls_n8n_for_the_succeeded_ca
     by_action_id = {a["action_id"]: a for a in body["execution"]["actions"]}
     assert by_action_id["action_1"]["attempt_count"] == 1
     assert by_action_id["action_2"]["attempt_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Week 5 Day 5: real multi-action execution with a SUPPORTED email.send_email
+# action - calendar and email coexist in the same plan, execute
+# independently, and a retry never re-sends whichever one already succeeded.
+# ---------------------------------------------------------------------------
+
+
+CALENDAR_AND_SEND_EMAIL_RAW_PLAN = {
+    "intent": "productivity_workflow",
+    "summary": "Schedule a meeting and send an email about it.",
+    "actions": [
+        {
+            "action_id": "action_1",
+            "tool": "calendar",
+            "operation": "create_event",
+            "parameters": {"title": "AI Team Meeting"},
+            "missing_information": [],
+        },
+        {
+            "action_id": "action_2",
+            "tool": "email",
+            "operation": "send_email",
+            "parameters": {"to": "adarsh@example.com", "subject": "Project Update", "body": "Here is the update."},
+            "missing_information": [],
+        },
+    ],
+}
+CALENDAR_AND_SEND_EMAIL_TEXT = (
+    "Schedule a meeting with the AI team tomorrow at 3 PM and send adarsh@example.com "
+    "an email about the project update."
+)
+
+
+def test_calendar_and_email_plan_cannot_execute_before_approval(configured_settings):
+    plan_id = _create_plan(CALENDAR_AND_SEND_EMAIL_RAW_PLAN, text=CALENDAR_AND_SEND_EMAIL_TEXT)["plan_id"]
+
+    response = client.post(f"/api/v1/plans/{plan_id}/execute")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["current_status"] == "awaiting_approval"
+
+
+def test_calendar_and_email_both_succeed_reports_executed(configured_settings):
+    fake_client = PerUrlFakeN8nClient(
+        responses={
+            CALENDAR_WEBHOOK_URL: {"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"},
+            EMAIL_WEBHOOK_URL: {"success": True, "message_id": "msg_1"},
+        }
+    )
+    n8n_client.set_n8n_client(fake_client)
+    plan_id = _create_and_approve_plan(CALENDAR_AND_SEND_EMAIL_RAW_PLAN, text=CALENDAR_AND_SEND_EMAIL_TEXT)
+
+    response = client.post(f"/api/v1/plans/{plan_id}/execute")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "executed"
+    assert body["execution"]["status"] == "success"
+
+    by_action_id = {a["action_id"]: a for a in body["execution"]["actions"]}
+    assert by_action_id["action_1"]["status"] == "succeeded"
+    assert by_action_id["action_2"]["status"] == "succeeded"
+    assert by_action_id["action_2"]["result"]["recipients"] == ["adarsh@example.com"]
+    assert by_action_id["action_2"]["result"]["message_id"] == "msg_1"
+
+
+def test_calendar_succeeds_and_email_fails_reports_partially_executed(configured_settings):
+    fake_client = PerUrlFakeN8nClient(
+        responses={
+            CALENDAR_WEBHOOK_URL: {"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"},
+            EMAIL_WEBHOOK_URL: {"success": False, "error_code": "SMTP_AUTH_FAILED", "message": "bad credentials"},
+        }
+    )
+    n8n_client.set_n8n_client(fake_client)
+    plan_id = _create_and_approve_plan(CALENDAR_AND_SEND_EMAIL_RAW_PLAN, text=CALENDAR_AND_SEND_EMAIL_TEXT)
+
+    response = client.post(f"/api/v1/plans/{plan_id}/execute")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "partially_executed"
+    assert body["execution"]["status"] == "partial"
+
+    by_action_id = {a["action_id"]: a for a in body["execution"]["actions"]}
+    assert by_action_id["action_1"]["status"] == "succeeded"
+    assert by_action_id["action_2"]["status"] == "failed"
+    assert by_action_id["action_2"]["error"]["code"] == "SMTP_AUTH_FAILED"
+
+
+def test_retry_after_email_failure_only_recalls_the_email_webhook_not_calendar(configured_settings):
+    fake_client = PerUrlFakeN8nClient(
+        responses={
+            CALENDAR_WEBHOOK_URL: {"success": True, "external_event_id": "evt_1", "html_link": "https://cal/evt_1"},
+            EMAIL_WEBHOOK_URL: {"success": False, "error_code": "SMTP_AUTH_FAILED", "message": "bad credentials"},
+        }
+    )
+    n8n_client.set_n8n_client(fake_client)
+    plan_id = _create_and_approve_plan(CALENDAR_AND_SEND_EMAIL_RAW_PLAN, text=CALENDAR_AND_SEND_EMAIL_TEXT)
+
+    first = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert first.status_code == 200
+    assert first.json()["status"] == "partially_executed"
+    assert len(fake_client.calls_to(CALENDAR_WEBHOOK_URL)) == 1
+    assert len(fake_client.calls_to(EMAIL_WEBHOOK_URL)) == 1
+
+    # Fix the email side (e.g. the SMTP credential), then retry the SAME plan.
+    fake_client.responses[EMAIL_WEBHOOK_URL] = {"success": True, "message_id": "msg_1"}
+
+    second = client.post(f"/api/v1/plans/{plan_id}/execute")
+    assert second.status_code == 200
+    body = second.json()
+    assert body["status"] == "executed"
+
+    # Calendar was NEVER re-dispatched on retry - only the failed email
+    # action was.
+    assert len(fake_client.calls_to(CALENDAR_WEBHOOK_URL)) == 1
+    assert len(fake_client.calls_to(EMAIL_WEBHOOK_URL)) == 2
+
+    by_action_id = {a["action_id"]: a for a in body["execution"]["actions"]}
+    assert by_action_id["action_1"]["attempt_count"] == 1
+    assert by_action_id["action_1"]["status"] == "succeeded"
+    assert by_action_id["action_2"]["attempt_count"] == 2
+    assert by_action_id["action_2"]["status"] == "succeeded"
+
+
+def test_plan_with_unresolved_email_recipient_stays_blocked_from_execution(configured_settings):
+    # RESOLVE_RECIPIENTS cannot find "Unknown Team" - the plan is stuck at
+    # needs_clarification (never approvable), so /execute is rejected before
+    # any adapter or n8n call happens. This is the same protection every
+    # other needs_clarification plan gets; nothing email-specific is needed
+    # to guarantee it.
+    raw_plan = {
+        "intent": "productivity_workflow",
+        "summary": "Schedule a meeting and email the Unknown Team.",
+        "actions": [
+            {
+                "action_id": "action_1",
+                "tool": "calendar",
+                "operation": "create_event",
+                "parameters": {"title": "AI Team Meeting"},
+                "missing_information": [],
+            },
+            {
+                "action_id": "action_2",
+                "tool": "email",
+                "operation": "send_email",
+                "parameters": {"to": "Unknown Team", "subject": "Project Update", "body": "Here is the update."},
+                "missing_information": [],
+            },
+        ],
+    }
+    created = _create_plan(
+        raw_plan,
+        text=(
+            "Schedule a meeting with the AI team tomorrow at 3 PM and send the Unknown Team "
+            "an email about the project update."
+        ),
+    )
+    assert created["status"] == "needs_clarification"
+
+    response = client.post(f"/api/v1/plans/{created['plan_id']}/execute")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["current_status"] == "needs_clarification"
