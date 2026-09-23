@@ -31,6 +31,7 @@ class ActionExecutionStatus(str, Enum):
 _STAGE_BY_CODE: dict[str, str] = {
     "MISSING_PARAMETERS": "validation",
     "DATETIME_NORMALIZATION_FAILED": "validation",
+    "UNRESOLVED_RECIPIENTS": "validation",
     "N8N_NOT_CONFIGURED": "configuration",
     "N8N_TIMEOUT": "transport",
     "N8N_UNREACHABLE": "transport",
